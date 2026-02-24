@@ -148,7 +148,17 @@ async function handleOutput(
 
 	// Send result to Telegram
 	if (output.result) {
+		log.info(
+			{
+				chatId,
+				resultLength: output.result.length,
+				preview: output.result.slice(0, 200),
+			},
+			"Forwarding result to Telegram",
+		);
 		await sendMessage(chatId, output.result);
+	} else {
+		log.debug({ chatId }, "Output with null result (session update only)");
 	}
 
 	// Agent finished its turn — stop typing until user sends another message

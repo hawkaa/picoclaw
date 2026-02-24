@@ -146,7 +146,7 @@ export async function resolveImage(chatId: string): Promise<string> {
 		path.join(chatDir(chatId), "workspace", "Dockerfile.extra"),
 		"utf-8",
 	);
-	const dockerfile = `FROM ${CONTAINER_BASE_IMAGE}\n${extraContent}`;
+	const dockerfile = `FROM ${CONTAINER_BASE_IMAGE}\nUSER root\n${extraContent}\nUSER bun`;
 	const tmpDockerfile = path.join(chatDir(chatId), ".Dockerfile.build");
 	fs.writeFileSync(tmpDockerfile, dockerfile);
 
