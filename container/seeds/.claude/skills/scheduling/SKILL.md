@@ -109,6 +109,7 @@ By label (deletes all tasks with that label for this chat):
 ## Notes
 
 - Each scheduled run executes in its own ephemeral container — no session state
-- The task's output is sent as a Telegram message automatically
+- Your last text output is sent as a Telegram message automatically
+- If you need a follow-up from the user, persist the relevant context to /workspace/ so the next session can pick it up
 - `current_tasks.yaml` reflects state at container start; re-read is not possible mid-session
 - Filename for IPC files must be unique — use a timestamp or random suffix

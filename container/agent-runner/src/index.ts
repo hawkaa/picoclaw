@@ -360,6 +360,9 @@ async function main(): Promise<void> {
 	if (containerInput.caller) {
 		systemPrompt += `\nSession started by: ${containerInput.caller.name} (via ${containerInput.caller.source})`;
 	}
+	if (containerInput.isScheduledTask) {
+		systemPrompt += `\nThis is a scheduled task. Your last text output will be sent to the user on Telegram. If you need a follow-up, make sure to remember what needs following up, as any response to your message will start in a new session.`;
+	}
 
 	// Build initial prompt
 	let prompt = containerInput.prompt;
