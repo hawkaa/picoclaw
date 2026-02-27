@@ -15,7 +15,7 @@ COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # Create workspace and IPC directories, give bun user ownership
-RUN mkdir -p /workspace /logs /ipc/messages /ipc/tasks /ipc/input /ipc/prayers /home/bun/.claude && \
+RUN mkdir -p /workspace /logs /ipc/messages /ipc/tasks /ipc/input /ipc/prayers /home/bun/.claude/projects/-workspace /home/bun/.claude/debug && \
     chown -R bun:bun /workspace /logs /ipc /home/bun /app
 
 # Non-root user (required for --dangerously-skip-permissions)

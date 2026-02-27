@@ -3,3 +3,4 @@ workspaces/
 data/
 .env
 dist/
+bots.json

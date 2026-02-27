@@ -1,5 +1,8 @@
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import type { BotConfig } from "./types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -15,6 +18,18 @@ export const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 min idle → close
 export const IPC_POLL_INTERVAL = 1000; // 1s
 export const TASK_CHECK_INTERVAL = 60 * 1000; // 60s
 export const TELEGRAM_POLL_TIMEOUT = 30; // seconds
+
+export function loadBotConfigs(): BotConfig[] {
+	const botsFile = path.join(PROJECT_ROOT, "bots.json");
+	if (!fs.existsSync(botsFile)) {
+		throw new Error(`bots.json not found at ${botsFile}`);
+	}
+	const raw = JSON.parse(fs.readFileSync(botsFile, "utf-8"));
+	if (!Array.isArray(raw) || raw.length === 0) {
+		throw new Error("bots.json must be a non-empty array");
+	}
+	return raw as BotConfig[];
+}
 
 export const OUTPUT_START_MARKER = "---PICOCLAW_OUTPUT_START---";
 export const OUTPUT_END_MARKER = "---PICOCLAW_OUTPUT_END---";

@@ -2,7 +2,6 @@ import { CronExpressionParser } from "cron-parser";
 import pino from "pino";
 
 import { TASK_CHECK_INTERVAL } from "./config.ts";
-import { sendMessage } from "./telegram.ts";
 import type { ContainerOutput, ScheduledTask } from "./types.ts";
 
 const log = pino({ name: "task-scheduler" });
@@ -15,6 +14,7 @@ export interface SchedulerDeps {
 		prompt: string,
 		task: { id: string; label?: string | undefined },
 	) => Promise<ContainerOutput>;
+	sendMessage: (chatId: number | string, text: string) => Promise<void>;
 }
 
 export function startTaskScheduler(deps: SchedulerDeps): void {
@@ -39,7 +39,7 @@ export function startTaskScheduler(deps: SchedulerDeps): void {
 					task,
 				);
 				if (result.result) {
-					await sendMessage(task.chatId, result.result);
+					await deps.sendMessage(task.chatId, result.result);
 				}
 			} catch (err) {
 				log.error({ taskId: task.id, err }, "Scheduled task failed");

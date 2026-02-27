@@ -23,6 +23,26 @@ function chatDir(chatId: string): string {
 	return path.join(WORKSPACES_DIR, chatId);
 }
 
+/** Create directory (and parents) writable by the container user. */
+function mkdirAll(dir: string): void {
+	fs.mkdirSync(dir, { recursive: true, mode: 0o777 });
+	// mkdirSync mode only applies to newly created dirs; force it for existing ones
+	fs.chmodSync(dir, 0o777);
+}
+
+/** Recursively chmod dirs to 777 and files to 666 so container user can write. */
+function chmodRecursive(dir: string): void {
+	fs.chmodSync(dir, 0o777);
+	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+		const full = path.join(dir, entry.name);
+		if (entry.isDirectory()) {
+			chmodRecursive(full);
+		} else {
+			fs.chmodSync(full, 0o666);
+		}
+	}
+}
+
 function readSecrets(): Record<string, string> {
 	const secrets: Record<string, string> = {};
 	for (const key of [
@@ -41,7 +61,7 @@ function readSecrets(): Record<string, string> {
  */
 export function seedWorkspace(chatId: string): void {
 	const workspaceDir = path.join(chatDir(chatId), "workspace");
-	fs.mkdirSync(workspaceDir, { recursive: true });
+	mkdirAll(workspaceDir);
 
 	// Check if workspace is empty (no files other than CLAUDE.md)
 	const existing = fs.readdirSync(workspaceDir);
@@ -50,6 +70,8 @@ export function seedWorkspace(chatId: string): void {
 	// Copy seeds into workspace
 	if (fs.existsSync(SEEDS_DIR)) {
 		fs.cpSync(SEEDS_DIR, workspaceDir, { recursive: true });
+		// Make all seeded dirs/files writable by container user (uid 1000)
+		chmodRecursive(workspaceDir);
 		log.info({ chatId }, "Seeded workspace with skills");
 	}
 }
@@ -70,7 +92,7 @@ export function clearSessionFiles(chatId: string): void {
 
 export function ensureSessionsDir(chatId: string): void {
 	const sessionsDir = path.join(chatDir(chatId), "sessions");
-	fs.mkdirSync(sessionsDir, { recursive: true });
+	mkdirAll(sessionsDir);
 
 	const settingsFile = path.join(sessionsDir, "settings.json");
 	if (!fs.existsSync(settingsFile)) {
@@ -94,10 +116,10 @@ export function ensureSessionsDir(chatId: string): void {
  */
 export function ensureIpcDirs(chatId: string): void {
 	const ipcDir = path.join(chatDir(chatId), "ipc");
-	fs.mkdirSync(path.join(ipcDir, "messages"), { recursive: true });
-	fs.mkdirSync(path.join(ipcDir, "tasks"), { recursive: true });
-	fs.mkdirSync(path.join(ipcDir, "input"), { recursive: true });
-	fs.mkdirSync(path.join(ipcDir, "prayers"), { recursive: true });
+	mkdirAll(path.join(ipcDir, "messages"));
+	mkdirAll(path.join(ipcDir, "tasks"));
+	mkdirAll(path.join(ipcDir, "input"));
+	mkdirAll(path.join(ipcDir, "prayers"));
 }
 
 /**
@@ -239,6 +261,11 @@ export async function spawnContainer(
 		}
 	};
 
+	// Per-container input directory so scheduled and interactive containers don't
+	// share the same /ipc/input and steal each other's messages.
+	const containerInputDir = path.join(base, "ipc", "input", containerName);
+	mkdirAll(containerInputDir);
+
 	const args = [
 		"run",
 		"-i",
@@ -251,6 +278,8 @@ export async function spawnContainer(
 		`${path.join(base, "sessions")}:/home/bun/.claude`,
 		"-v",
 		`${path.join(base, "ipc")}:/ipc`,
+		"-v",
+		`${containerInputDir}:/ipc/input`,
 		"-v",
 		`${path.join(base, "logs")}:/logs:ro`,
 		"-v",
@@ -409,15 +438,16 @@ export async function spawnContainer(
 }
 
 /**
- * Write a follow-up message to the container's IPC input directory.
+ * Write a follow-up message to a specific container's IPC input directory.
  */
 export function writeIpcInput(
 	chatId: string,
+	containerName: string,
 	text: string,
 	from?: { name: string; source: string } | undefined,
 ): void {
-	const inputDir = path.join(chatDir(chatId), "ipc", "input");
-	fs.mkdirSync(inputDir, { recursive: true });
+	const inputDir = path.join(chatDir(chatId), "ipc", "input", containerName);
+	mkdirAll(inputDir);
 	const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
 	const payload: Record<string, unknown> = { type: "message", text };
 	if (from) payload["from"] = from;
@@ -425,10 +455,10 @@ export function writeIpcInput(
 }
 
 /**
- * Write _close sentinel to signal container to exit.
+ * Write _close sentinel to signal a specific container to exit.
  */
-export function writeCloseSentinel(chatId: string): void {
-	const sentinelPath = path.join(chatDir(chatId), "ipc", "input", "_close");
+export function writeCloseSentinel(chatId: string, containerName: string): void {
+	const sentinelPath = path.join(chatDir(chatId), "ipc", "input", containerName, "_close");
 	fs.writeFileSync(sentinelPath, "");
 }
 
@@ -440,7 +470,7 @@ export function writeTasksSnapshot(
 	tasks: Array<Record<string, unknown>>,
 ): void {
 	const ipcDir = path.join(chatDir(chatId), "ipc");
-	fs.mkdirSync(ipcDir, { recursive: true });
+	mkdirAll(ipcDir);
 	fs.writeFileSync(path.join(ipcDir, "current_tasks.yaml"), formatYaml(tasks));
 }
 

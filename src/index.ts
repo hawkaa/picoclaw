@@ -2,7 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import pino from "pino";
 
-import { DATA_DIR, IDLE_TIMEOUT, WORKSPACES_DIR } from "./config.ts";
+import {
+	DATA_DIR,
+	IDLE_TIMEOUT,
+	loadBotConfigs,
+	WORKSPACES_DIR,
+} from "./config.ts";
 import {
 	cleanupOrphanedContainers,
 	clearSessionFiles,
@@ -16,14 +21,9 @@ import {
 } from "./container-runner.ts";
 import { startIpcWatcher } from "./ipc.ts";
 import { startTaskScheduler } from "./task-scheduler.ts";
-import {
-	getUpdates,
-	sendChatAction,
-	sendMessage,
-	setMyCommands,
-	type TelegramUpdate,
-} from "./telegram.ts";
+import { TelegramClient, type TelegramUpdate } from "./telegram.ts";
 import type {
+	BotConfig,
 	ContainerOutput,
 	ContainerState,
 	ScheduledTask,
@@ -36,14 +36,59 @@ const log = pino({
 	transport: { target: "pino-pretty" },
 });
 
-const ALLOWED_USER_ID = process.env["TELEGRAM_ALLOWED_USER_ID"] ?? "";
-if (!ALLOWED_USER_ID) {
-	log.fatal("TELEGRAM_ALLOWED_USER_ID not set");
+// --- Load bot configs ---
+const botConfigs = loadBotConfigs();
+if (botConfigs.length === 0) {
+	log.fatal("No bots configured in bots.json");
 	process.exit(1);
 }
-if (!process.env["TELEGRAM_BOT_TOKEN"]) {
-	log.fatal("TELEGRAM_BOT_TOKEN not set");
-	process.exit(1);
+
+// Build allowed userId → BotConfig lookup and TelegramClient instances
+const clientsByUserId = new Map<string, TelegramClient>();
+const clientsByChatId = new Map<string, TelegramClient>();
+const configsByUserId = new Map<string, BotConfig>();
+const clients: TelegramClient[] = [];
+
+for (const cfg of botConfigs) {
+	const client = new TelegramClient(cfg.name, cfg.botToken, cfg.allowedUserId);
+	clientsByUserId.set(cfg.allowedUserId, client);
+	configsByUserId.set(cfg.allowedUserId, cfg);
+	clients.push(client);
+}
+
+/** Dispatcher: route sendMessage to the correct bot by chatId */
+async function dispatchMessage(
+	chatId: number | string,
+	text: string,
+): Promise<void> {
+	const client = clientsByChatId.get(String(chatId));
+	if (client) {
+		await client.sendMessage(chatId, text);
+		return;
+	}
+	// Fallback: try all clients (first message from a chat before routing is set up)
+	for (const c of clients) {
+		try {
+			await c.sendMessage(chatId, text);
+			clientsByChatId.set(String(chatId), c);
+			return;
+		} catch {
+			// Try next client
+		}
+	}
+	log.warn({ chatId }, "No bot client could send message to this chatId");
+}
+
+/** Dispatcher for sendChatAction */
+async function dispatchChatAction(
+	chatId: number | string,
+	action = "typing",
+): Promise<void> {
+	const client = clientsByChatId.get(String(chatId));
+	if (client) {
+		await client.sendChatAction(chatId, action);
+		return;
+	}
 }
 
 // --- State ---
@@ -94,7 +139,7 @@ function startTyping(chatId: string): void {
 		chatId,
 		setInterval(() => {
 			if (containers.has(chatId)) {
-				sendChatAction(chatId).catch(() => {});
+				dispatchChatAction(chatId).catch(() => {});
 			} else {
 				stopTyping(chatId);
 			}
@@ -120,7 +165,7 @@ function resetIdleTimer(chatId: string): void {
 			const state = containers.get(chatId);
 			if (state) {
 				log.info({ chatId }, "Idle timeout, closing container");
-				writeCloseSentinel(chatId);
+				writeCloseSentinel(chatId, state.containerName);
 				containers.delete(chatId);
 				stopTyping(chatId);
 				idleTimers.delete(chatId);
@@ -156,13 +201,15 @@ async function handleOutput(
 			},
 			"Forwarding result to Telegram",
 		);
-		await sendMessage(chatId, output.result);
+		await dispatchMessage(chatId, output.result);
 	} else {
 		log.debug({ chatId }, "Output with null result (session update only)");
 	}
 
-	// Agent finished its turn — stop typing until user sends another message
-	stopTyping(chatId);
+	// Only stop typing on final result, not streaming text blocks
+	if (output.type !== "text") {
+		stopTyping(chatId);
+	}
 
 	// Reset idle timer on any output
 	resetIdleTimer(chatId);
@@ -189,7 +236,7 @@ async function startContainer(
 	const sessions = readSessions();
 	const sessionId = sessions[chatId]?.sessionId;
 
-	await sendChatAction(chatId);
+	await dispatchChatAction(chatId);
 
 	const { proc, containerName, result } = await spawnContainer(
 		chatId,
@@ -243,7 +290,11 @@ async function startContainer(
 		});
 }
 
-async function handleMessage(update: TelegramUpdate): Promise<void> {
+async function handleMessage(
+	update: TelegramUpdate,
+	client: TelegramClient,
+	allowedUserId: string,
+): Promise<void> {
 	const msg = update.message;
 	if (!msg?.text || !msg.from) return;
 
@@ -251,10 +302,16 @@ async function handleMessage(update: TelegramUpdate): Promise<void> {
 	const chatId = String(msg.chat.id);
 
 	// User allowlist
-	if (userId !== ALLOWED_USER_ID) {
-		log.debug({ userId }, "Ignoring message from non-allowed user");
+	if (userId !== allowedUserId) {
+		log.warn(
+			{ userId, bot: client.name },
+			"Ignoring message from non-allowed user",
+		);
 		return;
 	}
+
+	// Register chatId → client routing
+	clientsByChatId.set(chatId, client);
 
 	const text = msg.text.trim();
 
@@ -262,7 +319,7 @@ async function handleMessage(update: TelegramUpdate): Promise<void> {
 	if (text === "/new") {
 		const state = containers.get(chatId);
 		if (state) {
-			writeCloseSentinel(chatId);
+			writeCloseSentinel(chatId, state.containerName);
 			containers.delete(chatId);
 			stopTyping(chatId);
 			const timer = idleTimers.get(chatId);
@@ -276,7 +333,7 @@ async function handleMessage(update: TelegramUpdate): Promise<void> {
 		delete sessions[chatId];
 		writeSessions(sessions);
 		clearSessionFiles(chatId);
-		await sendMessage(chatId, "Session reset.");
+		await client.sendMessage(chatId, "Session reset.");
 		return;
 	}
 
@@ -287,9 +344,9 @@ async function handleMessage(update: TelegramUpdate): Promise<void> {
 	const state = containers.get(chatId);
 	if (state) {
 		state.lastActivity = Date.now();
-		writeIpcInput(chatId, text, caller);
+		writeIpcInput(chatId, state.containerName, text, caller);
 		startTyping(chatId);
-		await sendChatAction(chatId);
+		await client.sendChatAction(chatId);
 		return;
 	}
 
@@ -333,20 +390,57 @@ async function spawnEphemeral(
 	return output;
 }
 
-// --- Main loop ---
+// --- Polling loop per bot ---
+async function pollBot(client: TelegramClient): Promise<void> {
+	let offset: number | undefined;
+	log.info({ bot: client.name }, "Starting Telegram polling...");
+
+	while (true) {
+		try {
+			const updates = await client.getUpdates(offset);
+			for (const update of updates) {
+				offset = update.update_id + 1;
+				try {
+					await handleMessage(update, client, client.allowedUserId);
+				} catch (err) {
+					log.error(
+						{ err, update_id: update.update_id, bot: client.name },
+						"Error handling message",
+					);
+				}
+			}
+		} catch (err) {
+			log.error(
+				{ err, bot: client.name },
+				"Telegram polling error, retrying in 5s",
+			);
+			await new Promise((r) => setTimeout(r, 5000));
+		}
+	}
+}
+
+// --- Main ---
 async function main(): Promise<void> {
 	log.info("PicoClaw starting...");
 
 	await cleanupOrphanedContainers();
 
-	await setMyCommands([{ command: "new", description: "Start a new session" }]);
+	// Set commands for all bots
+	for (const client of clients) {
+		await client.setMyCommands([
+			{ command: "new", description: "Start a new session" },
+		]);
+	}
 
 	fs.mkdirSync(DATA_DIR, { recursive: true });
 	fs.mkdirSync(WORKSPACES_DIR, { recursive: true });
 
+	// Collect all allowed user IDs
+	const allAllowedUserIds = botConfigs.map((c) => c.allowedUserId);
+
 	// Start subsystems
 	startIpcWatcher({
-		getAllowedChatId: () => ALLOWED_USER_ID,
+		getAllowedChatId: () => allAllowedUserIds.join(","),
 		readTasks,
 		writeTasks,
 		writeSnapshot: (chatId, tasks) =>
@@ -354,45 +448,27 @@ async function main(): Promise<void> {
 				chatId,
 				tasks as unknown as Array<Record<string, unknown>>,
 			),
+		sendMessage: dispatchMessage,
 	});
 
 	startTaskScheduler({
 		readTasks,
 		writeTasks,
 		spawnEphemeral,
+		sendMessage: dispatchMessage,
 	});
 
-	// Telegram polling loop
-	let offset: number | undefined;
-	log.info("Starting Telegram polling...");
-
-	while (true) {
-		try {
-			const updates = await getUpdates(offset);
-			for (const update of updates) {
-				offset = update.update_id + 1;
-				try {
-					await handleMessage(update);
-				} catch (err) {
-					log.error(
-						{ err, update_id: update.update_id },
-						"Error handling message",
-					);
-				}
-			}
-		} catch (err) {
-			log.error({ err }, "Telegram polling error, retrying in 5s");
-			await new Promise((r) => setTimeout(r, 5000));
-		}
-	}
+	// Start parallel polling loops (one per bot)
+	const pollers = clients.map((client) => pollBot(client));
+	await Promise.all(pollers);
 }
 
 // Graceful shutdown
 function shutdown(): void {
 	log.info("Shutting down...");
-	for (const [chatId, _state] of containers) {
+	for (const [chatId, state] of containers) {
 		log.info({ chatId }, "Closing container");
-		writeCloseSentinel(chatId);
+		writeCloseSentinel(chatId, state.containerName);
 	}
 	// Give containers a moment to exit
 	setTimeout(() => process.exit(0), 3000);

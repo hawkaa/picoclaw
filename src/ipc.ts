@@ -4,7 +4,6 @@ import { CronExpressionParser } from "cron-parser";
 import pino from "pino";
 
 import { DATA_DIR, IPC_POLL_INTERVAL, WORKSPACES_DIR } from "./config.ts";
-import { sendMessage } from "./telegram.ts";
 import type { ScheduledTask } from "./types.ts";
 
 const log = pino({ name: "ipc" });
@@ -14,6 +13,7 @@ export interface IpcDeps {
 	readTasks: () => ScheduledTask[];
 	writeTasks: (tasks: ScheduledTask[]) => void;
 	writeSnapshot: (chatId: string, tasks: ScheduledTask[]) => void;
+	sendMessage: (chatId: number | string, text: string) => Promise<void>;
 }
 
 let running = false;
@@ -60,7 +60,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
 						const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
 						fs.unlinkSync(filePath);
 						if (data.text) {
-							await sendMessage(chatId, data.text);
+							await deps.sendMessage(chatId, data.text);
 							log.info({ chatId }, "IPC message sent to Telegram");
 						}
 					} catch (err) {

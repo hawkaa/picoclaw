@@ -1,3 +1,10 @@
+export interface BotConfig {
+	name: string;
+	botToken: string;
+	allowedUserId: string;
+	anthropicModel?: string | undefined;
+}
+
 export interface ContainerInput {
 	prompt: string;
 	sessionId?: string | undefined;
@@ -12,6 +19,7 @@ export interface ContainerOutput {
 	result: string | null;
 	newSessionId?: string | undefined;
 	error?: string;
+	type?: "text" | "result" | undefined;
 }
 
 export interface ContainerState {

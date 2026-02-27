@@ -29,6 +29,7 @@ interface ContainerOutput {
 	result: string | null;
 	newSessionId?: string;
 	error?: string;
+	type?: "text" | "result";
 }
 
 interface SDKUserMessage {
@@ -289,6 +290,8 @@ async function runQuery(
 				const text = textBlocks.join("\n");
 				log(`Assistant text: ${text.slice(0, 300)}`);
 				assistantTexts.push(text);
+				// Stream to host immediately
+				writeOutput({ status: "success", result: text, type: "text" });
 			}
 		}
 
@@ -313,7 +316,7 @@ async function runQuery(
 			log(
 				`Result #${resultCount}: stop_reason=${stopReason}, textResult=${textResult ? `"${textResult.slice(0, 200)}"` : "null"}, assistantTexts=${assistantTexts.length} blocks (${allAssistantText.length} chars), finalResult=${finalResult ? `"${finalResult.slice(0, 200)}"` : "null"}`,
 			);
-			writeOutput({ status: "success", result: finalResult, newSessionId });
+			writeOutput({ status: "success", result: null, newSessionId, type: "result" });
 			assistantTexts.length = 0;
 		}
 	}

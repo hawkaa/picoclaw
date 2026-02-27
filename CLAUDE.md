@@ -20,6 +20,12 @@ Strict tsconfig with these notable settings:
 - `noUncheckedIndexedAccess` — array/object indexing returns `T | undefined`
 - Node.js builtins use `node:` protocol (`import fs from "node:fs"`)
 
+## Deployment
+
+- **Service**: `systemctl restart picoclaw` — host process runs as a systemd unit
+- **Docker image**: `container/build.sh` — rebuilds `picoclaw-base:latest`
+- Changes to `src/` require service restart; changes to `container/agent-runner/` require image rebuild + restart
+
 ## Project structure
 
 - `src/` — host process: Telegram bot, container lifecycle, IPC, task scheduling
