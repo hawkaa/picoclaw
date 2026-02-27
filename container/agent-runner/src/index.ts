@@ -358,13 +358,26 @@ async function main(): Promise<void> {
 		fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL);
 	} catch {}
 
-	// Build system prompt with caller identity
+	// Build system prompt with session context
 	let systemPrompt = SYSTEM_PROMPT;
+
+	const contextLines: string[] = [];
 	if (containerInput.caller) {
-		systemPrompt += `\nSession started by: ${containerInput.caller.name} (via ${containerInput.caller.source})`;
+		contextLines.push(
+			`User: ${containerInput.caller.name} (${containerInput.caller.source})`,
+		);
 	}
+	const activeModel = sdkEnv["ANTHROPIC_MODEL"];
+	if (activeModel) {
+		contextLines.push(`Model: ${activeModel}`);
+	}
+	if (contextLines.length > 0) {
+		systemPrompt += `\n\nSession context:\n${contextLines.join("\n")}`;
+	}
+
 	if (containerInput.isScheduledTask) {
-		systemPrompt += `\nThis is a scheduled task. Your last text output will be sent to the user on Telegram. If you need a follow-up, make sure to remember what needs following up, as any response to your message will start in a new session.`;
+		systemPrompt +=
+			"\nThis is a scheduled task. Your last text output will be sent to the user on Telegram. If you need a follow-up, make sure to remember what needs following up, as any response to your message will start in a new session.";
 	}
 
 	// Build initial prompt

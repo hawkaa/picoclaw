@@ -6,6 +6,8 @@ import {
 	DATA_DIR,
 	IDLE_TIMEOUT,
 	loadBotConfigs,
+	MODEL_ALIASES,
+	resolveModelId,
 	WORKSPACES_DIR,
 } from "./config.ts";
 import {
@@ -54,6 +56,13 @@ for (const cfg of botConfigs) {
 	clientsByUserId.set(cfg.allowedUserId, client);
 	configsByUserId.set(cfg.allowedUserId, cfg);
 	clients.push(client);
+}
+
+/** Look up the BotConfig for a given chatId (via the client routing table). */
+function botConfigForChat(chatId: string): BotConfig | undefined {
+	const client = clientsByChatId.get(chatId);
+	if (!client) return undefined;
+	return configsByUserId.get(client.allowedUserId);
 }
 
 /** Dispatcher: route sendMessage to the correct bot by chatId */
@@ -181,9 +190,11 @@ async function handleOutput(
 	// Update session ID
 	if (output.newSessionId) {
 		const sessions = readSessions();
+		const existing = sessions[chatId];
 		sessions[chatId] = {
 			sessionId: output.newSessionId,
 			lastActivity: new Date().toISOString(),
+			model: existing?.model,
 		};
 		writeSessions(sessions);
 
@@ -234,13 +245,15 @@ async function startContainer(
 	);
 
 	const sessions = readSessions();
-	const sessionId = sessions[chatId]?.sessionId;
+	const session = sessions[chatId];
+	const sessionId = session?.sessionId || undefined;
+	const model = session?.model ?? botConfigForChat(chatId)?.defaultModel;
 
 	await dispatchChatAction(chatId);
 
 	const { proc, containerName, result } = await spawnContainer(
 		chatId,
-		{ prompt, sessionId, chatId, caller },
+		{ prompt, sessionId, chatId, caller, model },
 		(output) => handleOutput(chatId, output),
 	);
 
@@ -268,9 +281,11 @@ async function startContainer(
 
 			if (finalOutput.newSessionId) {
 				const sessions = readSessions();
+				const existing = sessions[chatId];
 				sessions[chatId] = {
 					sessionId: finalOutput.newSessionId,
 					lastActivity: new Date().toISOString(),
+					model: existing?.model,
 				};
 				writeSessions(sessions);
 			}
@@ -315,8 +330,26 @@ async function handleMessage(
 
 	const text = msg.text.trim();
 
-	// /new command: reset session
-	if (text === "/new") {
+	// /new command: reset session (optionally with model)
+	if (text === "/new" || text.startsWith("/new ")) {
+		const modelArg = text.slice("/new".length).trim();
+
+		// Validate model argument if provided
+		let model: string | undefined;
+		if (modelArg) {
+			// Check if it's a known alias or looks like a model ID (contains hyphen)
+			const resolved = resolveModelId(modelArg);
+			if (resolved === modelArg && !modelArg.includes("-")) {
+				const aliases = Object.keys(MODEL_ALIASES).join(", ");
+				await client.sendMessage(
+					chatId,
+					`Unknown model "${modelArg}". Valid aliases: ${aliases}`,
+				);
+				return;
+			}
+			model = resolved;
+		}
+
 		const state = containers.get(chatId);
 		if (state) {
 			writeCloseSentinel(chatId, state.containerName);
@@ -330,10 +363,26 @@ async function handleMessage(
 		}
 		// Clear session ID and wipe Claude session files
 		const sessions = readSessions();
-		delete sessions[chatId];
+		if (model) {
+			sessions[chatId] = {
+				sessionId: "",
+				lastActivity: new Date().toISOString(),
+				model,
+			};
+		} else {
+			delete sessions[chatId];
+		}
 		writeSessions(sessions);
 		clearSessionFiles(chatId);
-		await client.sendMessage(chatId, "Session reset.");
+
+		const effectiveModel =
+			model ??
+			botConfigForChat(chatId)?.defaultModel ??
+			process.env["ANTHROPIC_MODEL"];
+		const reply = effectiveModel
+			? `Session reset. Model: ${effectiveModel}`
+			: "Session reset.";
+		await client.sendMessage(chatId, reply);
 		return;
 	}
 
@@ -428,7 +477,7 @@ async function main(): Promise<void> {
 	// Set commands for all bots
 	for (const client of clients) {
 		await client.setMyCommands([
-			{ command: "new", description: "Start a new session" },
+			{ command: "new", description: "New session (/new opus, /new sonnet)" },
 		]);
 	}
 

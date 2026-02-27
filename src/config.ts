@@ -19,6 +19,16 @@ export const IPC_POLL_INTERVAL = 1000; // 1s
 export const TASK_CHECK_INTERVAL = 60 * 1000; // 60s
 export const TELEGRAM_POLL_TIMEOUT = 30; // seconds
 
+export const MODEL_ALIASES: Record<string, string> = {
+	opus: "claude-opus-4-6",
+	sonnet: "claude-sonnet-4-6",
+	haiku: "claude-haiku-4-5-20251001",
+};
+
+export function resolveModelId(alias: string): string {
+	return MODEL_ALIASES[alias.toLowerCase()] ?? alias;
+}
+
 export function loadBotConfigs(): BotConfig[] {
 	const botsFile = path.join(PROJECT_ROOT, "bots.json");
 	if (!fs.existsSync(botsFile)) {
@@ -27,6 +37,13 @@ export function loadBotConfigs(): BotConfig[] {
 	const raw = JSON.parse(fs.readFileSync(botsFile, "utf-8"));
 	if (!Array.isArray(raw) || raw.length === 0) {
 		throw new Error("bots.json must be a non-empty array");
+	}
+	// Migration: accept anthropicModel as fallback for defaultModel
+	for (const entry of raw) {
+		if (!entry.defaultModel && entry.anthropicModel) {
+			entry.defaultModel = entry.anthropicModel;
+			delete entry.anthropicModel;
+		}
 	}
 	return raw as BotConfig[];
 }

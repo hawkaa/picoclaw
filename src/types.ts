@@ -2,7 +2,7 @@ export interface BotConfig {
 	name: string;
 	botToken: string;
 	allowedUserId: string;
-	anthropicModel?: string | undefined;
+	defaultModel?: string | undefined;
 }
 
 export interface ContainerInput {
@@ -12,6 +12,7 @@ export interface ContainerInput {
 	isScheduledTask?: boolean;
 	caller?: { name: string; source: "telegram" | "scheduler" } | undefined;
 	secrets?: Record<string, string> | undefined;
+	model?: string | undefined;
 }
 
 export interface ContainerOutput {
@@ -45,4 +46,5 @@ export interface ScheduledTask {
 export interface SessionData {
 	sessionId: string;
 	lastActivity: string;
+	model?: string | undefined;
 }

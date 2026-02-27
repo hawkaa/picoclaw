@@ -43,7 +43,9 @@ function chmodRecursive(dir: string): void {
 	}
 }
 
-function readSecrets(): Record<string, string> {
+function readSecrets(
+	modelOverride?: string | undefined,
+): Record<string, string> {
 	const secrets: Record<string, string> = {};
 	for (const key of [
 		"CLAUDE_CODE_OAUTH_TOKEN",
@@ -52,6 +54,9 @@ function readSecrets(): Record<string, string> {
 	]) {
 		const val = process.env[key];
 		if (val) secrets[key] = val;
+	}
+	if (modelOverride) {
+		secrets["ANTHROPIC_MODEL"] = modelOverride;
 	}
 	return secrets;
 }
@@ -294,7 +299,7 @@ export async function spawnContainer(
 	log.info({ chatId, logFile: currentLogFile }, "Container session started");
 
 	// Pass secrets via stdin
-	input.secrets = readSecrets();
+	input.secrets = readSecrets(input.model);
 	proc.stdin?.write(JSON.stringify(input));
 	proc.stdin?.end();
 	input.secrets = undefined;
@@ -457,8 +462,17 @@ export function writeIpcInput(
 /**
  * Write _close sentinel to signal a specific container to exit.
  */
-export function writeCloseSentinel(chatId: string, containerName: string): void {
-	const sentinelPath = path.join(chatDir(chatId), "ipc", "input", containerName, "_close");
+export function writeCloseSentinel(
+	chatId: string,
+	containerName: string,
+): void {
+	const sentinelPath = path.join(
+		chatDir(chatId),
+		"ipc",
+		"input",
+		containerName,
+		"_close",
+	);
 	fs.writeFileSync(sentinelPath, "");
 }
 
