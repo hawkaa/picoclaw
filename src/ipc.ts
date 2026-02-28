@@ -3,7 +3,12 @@ import path from "node:path";
 import { CronExpressionParser } from "cron-parser";
 import pino from "pino";
 
-import { DATA_DIR, IPC_POLL_INTERVAL, WORKSPACES_DIR } from "./config.ts";
+import {
+	DATA_DIR,
+	IPC_POLL_INTERVAL,
+	resolveModelId,
+	WORKSPACES_DIR,
+} from "./config.ts";
 import type { ScheduledTask } from "./types.ts";
 
 const log = pino({ name: "ipc" });
@@ -183,12 +188,14 @@ function processTaskIpc(
 		schedule_value?: string;
 		status?: string;
 		chatId?: string;
+		model?: string;
 	},
 	sourceChatId: string,
 	deps: IpcDeps,
 ): void {
 	const tasks = deps.readTasks();
 	const chatId = data.chatId || sourceChatId;
+	if (data.model) data.model = resolveModelId(data.model);
 
 	switch (data.type) {
 		case "schedule": {
@@ -212,6 +219,8 @@ function processTaskIpc(
 					existing.schedule_value = data.schedule_value;
 					existing.next_run = nextRun;
 					existing.status = "active";
+					if (data.model !== undefined)
+						existing.model = data.model || undefined;
 					deps.writeTasks(tasks);
 					deps.writeSnapshot(
 						chatId,
@@ -235,6 +244,7 @@ function processTaskIpc(
 				next_run: nextRun,
 				status: "active",
 				created_at: new Date().toISOString(),
+				...(data.model ? { model: data.model } : {}),
 			};
 			tasks.push(task);
 			deps.writeTasks(tasks);
@@ -259,6 +269,7 @@ function processTaskIpc(
 			if (data.status === "active" || data.status === "paused") {
 				task.status = data.status;
 			}
+			if (data.model !== undefined) task.model = data.model || undefined;
 			if (data.schedule_type && data.schedule_value) {
 				const nextRun = computeNextRun(data.schedule_type, data.schedule_value);
 				if (nextRun !== null) {

@@ -34,6 +34,23 @@ exists for this chat, it is updated in place rather than duplicated.
 }
 ```
 
+### Model override
+
+Add an optional `"model"` field to run a task with a specific model. Accepts
+aliases (`opus`, `sonnet`, `haiku`) or full model IDs (e.g. `claude-opus-4-6`).
+If omitted, the task uses the system default at the time it runs.
+
+```json
+{
+  "type": "schedule",
+  "label": "deep-analysis",
+  "prompt": "Analyze yesterday's metrics in detail.",
+  "schedule_type": "cron",
+  "schedule_value": "0 7 * * *",
+  "model": "opus"
+}
+```
+
 Always use a label for recurring tasks so re-runs of your setup logic are safe.
 
 ### Schedule types
@@ -64,6 +81,18 @@ Change the prompt, schedule, or status of a task by its ID.
 
 ```json
 {"type": "update", "taskId": "task-abc123", "status": "active"}
+```
+
+Set or change the model:
+
+```json
+{"type": "update", "taskId": "task-abc123", "model": "haiku"}
+```
+
+Clear the model override (revert to system default):
+
+```json
+{"type": "update", "taskId": "task-abc123", "model": ""}
 ```
 
 You can combine fields in one call:

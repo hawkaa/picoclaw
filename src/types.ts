@@ -41,6 +41,7 @@ export interface ScheduledTask {
 	next_run: string | null;
 	status: "active" | "paused";
 	created_at: string;
+	model?: string | undefined;
 }
 
 export interface SessionData {

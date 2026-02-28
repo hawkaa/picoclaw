@@ -12,7 +12,11 @@ export interface SchedulerDeps {
 	spawnEphemeral: (
 		chatId: string,
 		prompt: string,
-		task: { id: string; label?: string | undefined },
+		task: {
+			id: string;
+			label?: string | undefined;
+			model?: string | undefined;
+		},
 	) => Promise<ContainerOutput>;
 	sendMessage: (chatId: number | string, text: string) => Promise<void>;
 }

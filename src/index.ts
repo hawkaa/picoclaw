@@ -407,7 +407,7 @@ async function handleMessage(
 async function spawnEphemeral(
 	chatId: string,
 	prompt: string,
-	task: { id: string; label?: string | undefined },
+	task: { id: string; label?: string | undefined; model?: string | undefined },
 ): Promise<ContainerOutput> {
 	seedWorkspace(chatId);
 	ensureWorkspaceGit(chatId);
@@ -430,6 +430,7 @@ async function spawnEphemeral(
 		chatId,
 		isScheduledTask: true,
 		caller,
+		model: task.model,
 	});
 	const output = await result;
 	await commitWorkspace(chatId, {
