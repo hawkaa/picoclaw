@@ -27,6 +27,7 @@ import type {
 	BotConfig,
 	ContainerOutput,
 	ContainerState,
+	ImageAttachment,
 	ScheduledTask,
 	SessionData,
 } from "./types.ts";
@@ -232,6 +233,7 @@ async function startContainer(
 	chatId: string,
 	prompt: string,
 	caller?: { name: string; source: "telegram" | "scheduler" } | undefined,
+	images?: ImageAttachment[] | undefined,
 ): Promise<void> {
 	// Capture spawn time before any async work. Used to detect if /new was called
 	// while this container was running (sessionResets[chatId] > spawnTime).
@@ -261,7 +263,7 @@ async function startContainer(
 
 	const { proc, containerName, result } = await spawnContainer(
 		chatId,
-		{ prompt, sessionId, chatId, caller, model, anthropicApiKey },
+		{ prompt, sessionId, chatId, caller, model, anthropicApiKey, images },
 		async (output) => {
 			// Drop output (including session writes) from containers that were
 			// superseded by a /new reset after this container was spawned.
@@ -324,13 +326,32 @@ async function startContainer(
 		});
 }
 
+function inferMediaType(filePath: string): string {
+	const ext = filePath.split(".").pop()?.toLowerCase();
+	switch (ext) {
+		case "jpg":
+		case "jpeg":
+			return "image/jpeg";
+		case "png":
+			return "image/png";
+		case "gif":
+			return "image/gif";
+		case "webp":
+			return "image/webp";
+		default:
+			return "image/jpeg";
+	}
+}
+
 async function handleMessage(
 	update: TelegramUpdate,
 	client: TelegramClient,
 	allowedUserId: string,
 ): Promise<void> {
 	const msg = update.message;
-	if (!msg?.text || !msg.from) return;
+	if (!msg?.from) return;
+	// Accept messages with text or photo (or both via caption)
+	if (!msg.text && !msg.photo) return;
 
 	const userId = String(msg.from.id);
 	const chatId = String(msg.chat.id);
@@ -347,7 +368,27 @@ async function handleMessage(
 	// Register chatId → client routing
 	clientsByChatId.set(chatId, client);
 
-	const text = msg.text.trim();
+	const text = (msg.text ?? msg.caption ?? "").trim();
+
+	// Download photo if present
+	let images: ImageAttachment[] | undefined;
+	if (msg.photo && msg.photo.length > 0) {
+		try {
+			// Telegram provides multiple sizes; pick the largest (last in array)
+			const largest = msg.photo.at(-1);
+			if (!largest) throw new Error("Photo array unexpectedly empty");
+			const fileInfo = await client.getFile(largest.file_id);
+			const buffer = await client.downloadFile(fileInfo.file_path);
+			const mediaType = inferMediaType(fileInfo.file_path);
+			images = [{ data: buffer.toString("base64"), mediaType }];
+			log.info(
+				{ chatId, fileSize: buffer.length, mediaType },
+				"Downloaded Telegram photo",
+			);
+		} catch (err) {
+			log.error({ err, chatId }, "Failed to download photo");
+		}
+	}
 
 	// /new command: reset session (optionally with model)
 	if (text === "/new" || text.startsWith("/new ")) {
@@ -413,14 +454,14 @@ async function handleMessage(
 	const state = containers.get(chatId);
 	if (state) {
 		state.lastActivity = Date.now();
-		writeIpcInput(chatId, state.containerName, text, caller);
+		writeIpcInput(chatId, state.containerName, text, caller, images);
 		startTyping(chatId);
 		await client.sendChatAction(chatId);
 		return;
 	}
 
 	// No container → spawn new one
-	await startContainer(chatId, text, caller);
+	await startContainer(chatId, text, caller, images);
 }
 
 // --- Ephemeral container for scheduled tasks ---

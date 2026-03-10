@@ -15,6 +15,11 @@ import {
 	query,
 } from "@anthropic-ai/claude-agent-sdk";
 
+interface ImageAttachment {
+	data: string;
+	mediaType: string;
+}
+
 interface ContainerInput {
 	prompt: string;
 	sessionId?: string;
@@ -22,6 +27,7 @@ interface ContainerInput {
 	isScheduledTask?: boolean;
 	caller?: { name: string; source: "telegram" | "scheduler" };
 	secrets?: Record<string, string>;
+	images?: ImageAttachment[];
 }
 
 interface ContainerOutput {
@@ -32,9 +38,18 @@ interface ContainerOutput {
 	type?: "text" | "result";
 }
 
+// Content block types matching Anthropic API
+type TextBlock = { type: "text"; text: string };
+type ImageBlock = {
+	type: "image";
+	source: { type: "base64"; media_type: string; data: string };
+};
+type ContentBlock = TextBlock | ImageBlock;
+type MessageContent = string | ContentBlock[];
+
 interface SDKUserMessage {
 	type: "user";
-	message: { role: "user"; content: string };
+	message: { role: "user"; content: MessageContent };
 	parent_tool_use_id: null;
 	session_id: string;
 }
@@ -52,16 +67,40 @@ If /workspace/Dockerfile.extra exists, it extends your container image (cached, 
 If /workspace/start.sh exists, it runs before you start.
 To send a message while still working, write a JSON file to /ipc/messages/.`;
 
+/** Build multimodal content from text and optional images. */
+function buildContent(
+	text: string,
+	images?: ImageAttachment[],
+): MessageContent {
+	if (!images || images.length === 0) return text;
+
+	const blocks: ContentBlock[] = [];
+	for (const img of images) {
+		blocks.push({
+			type: "image",
+			source: {
+				type: "base64",
+				media_type: img.mediaType,
+				data: img.data,
+			},
+		});
+	}
+	if (text) {
+		blocks.push({ type: "text", text });
+	}
+	return blocks;
+}
+
 class MessageStream {
 	private queue: SDKUserMessage[] = [];
 	private waiting: (() => void) | null = null;
 	private done = false;
 	sessionId = "";
 
-	push(text: string): void {
+	push(content: MessageContent): void {
 		this.queue.push({
 			type: "user",
-			message: { role: "user", content: text },
+			message: { role: "user", content },
 			parent_tool_use_id: null,
 			session_id: "",
 		});
@@ -144,7 +183,12 @@ function shouldClose(): boolean {
 	return false;
 }
 
-function drainIpcInput(): string[] {
+/** Parsed IPC input message with optional image attachments. */
+interface IpcMessage {
+	content: MessageContent;
+}
+
+function drainIpcInput(): IpcMessage[] {
 	try {
 		fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
 		const files = fs
@@ -152,20 +196,24 @@ function drainIpcInput(): string[] {
 			.filter((f) => f.endsWith(".json"))
 			.sort();
 
-		const messages: string[] = [];
+		const messages: IpcMessage[] = [];
 		for (const file of files) {
 			const filePath = path.join(IPC_INPUT_DIR, file);
 			try {
 				const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
 				fs.unlinkSync(filePath);
-				if (data.type === "message" && data.text) {
+				if (data.type === "message") {
 					const from = data.from as
 						| { name: string; source: string }
 						| undefined;
+					const rawText = data.text || "";
 					const text = from
-						? `[${from.name} via ${from.source}] ${data.text}`
-						: data.text;
-					messages.push(text);
+						? `[${from.name} via ${from.source}] ${rawText}`
+						: rawText;
+					const images = data.images as ImageAttachment[] | undefined;
+					messages.push({
+						content: buildContent(text, images),
+					});
 				}
 			} catch (err) {
 				log(
@@ -183,7 +231,7 @@ function drainIpcInput(): string[] {
 	}
 }
 
-function waitForIpcMessage(): Promise<string | null> {
+function waitForIpcMessage(): Promise<IpcMessage[] | null> {
 	return new Promise((resolve) => {
 		const poll = () => {
 			if (shouldClose()) {
@@ -192,7 +240,7 @@ function waitForIpcMessage(): Promise<string | null> {
 			}
 			const messages = drainIpcInput();
 			if (messages.length > 0) {
-				resolve(messages.join("\n"));
+				resolve(messages);
 				return;
 			}
 			setTimeout(poll, IPC_POLL_MS);
@@ -202,7 +250,7 @@ function waitForIpcMessage(): Promise<string | null> {
 }
 
 async function runQuery(
-	prompt: string,
+	content: MessageContent,
 	sessionId: string | undefined,
 	sdkEnv: Record<string, string | undefined>,
 	systemPrompt: string,
@@ -213,7 +261,7 @@ async function runQuery(
 	closedDuringQuery: boolean;
 }> {
 	const stream = new MessageStream();
-	stream.push(prompt);
+	stream.push(content);
 
 	let ipcPolling = true;
 	let closedDuringQuery = false;
@@ -227,9 +275,13 @@ async function runQuery(
 			return;
 		}
 		const messages = drainIpcInput();
-		for (const text of messages) {
-			log(`Piping IPC message into active query (${text.length} chars)`);
-			stream.push(text);
+		for (const msg of messages) {
+			const preview =
+				typeof msg.content === "string"
+					? msg.content.length
+					: `${msg.content.length} blocks`;
+			log(`Piping IPC message into active query (${preview})`);
+			stream.push(msg.content);
 		}
 		setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
 	};
@@ -380,15 +432,33 @@ async function main(): Promise<void> {
 			"\nThis is a scheduled task. Your last text output will be sent to the user on Telegram. If you need a follow-up, make sure to remember what needs following up, as any response to your message will start in a new session.";
 	}
 
-	// Build initial prompt
-	let prompt = containerInput.prompt;
+	// Build initial prompt (text + optional images from ContainerInput)
+	let promptText = containerInput.prompt;
 	if (containerInput.isScheduledTask) {
-		prompt = `[SCHEDULED TASK]\n\n${prompt}`;
+		promptText = `[SCHEDULED TASK]\n\n${promptText}`;
 	}
 	const pending = drainIpcInput();
 	if (pending.length > 0) {
-		prompt += `\n${pending.join("\n")}`;
+		// Append text from pending messages
+		for (const msg of pending) {
+			if (typeof msg.content === "string") {
+				promptText += `\n${msg.content}`;
+			} else {
+				// Extract text blocks from multimodal content
+				for (const block of msg.content) {
+					if (block.type === "text") {
+						promptText += `\n${block.text}`;
+					}
+				}
+			}
+		}
 	}
+
+	// Build initial content (may be multimodal if images were sent with first message)
+	let initialContent: MessageContent = buildContent(
+		promptText,
+		containerInput.images,
+	);
 
 	// Query loop: run query → wait for IPC message → repeat
 	let resumeAt: string | undefined;
@@ -397,7 +467,7 @@ async function main(): Promise<void> {
 			log(`Starting query (session: ${sessionId || "new"})...`);
 
 			const queryResult = await runQuery(
-				prompt,
+				initialContent,
 				sessionId,
 				sdkEnv,
 				systemPrompt,
@@ -416,14 +486,33 @@ async function main(): Promise<void> {
 			writeOutput({ status: "success", result: null, newSessionId: sessionId });
 
 			log("Query ended, waiting for next IPC message...");
-			const nextMessage = await waitForIpcMessage();
-			if (nextMessage === null) {
+			const nextMessages = await waitForIpcMessage();
+			if (nextMessages === null) {
 				log("Close sentinel received, exiting");
 				break;
 			}
 
-			log(`Got new message (${nextMessage.length} chars), starting new query`);
-			prompt = nextMessage;
+			// Merge all pending messages into a single content payload
+			if (nextMessages.length === 1) {
+				initialContent = nextMessages[0].content;
+			} else {
+				// Multiple messages: concatenate text, collect images
+				const blocks: ContentBlock[] = [];
+				for (const msg of nextMessages) {
+					if (typeof msg.content === "string") {
+						blocks.push({ type: "text", text: msg.content });
+					} else {
+						blocks.push(...msg.content);
+					}
+				}
+				initialContent = blocks;
+			}
+
+			const preview =
+				typeof initialContent === "string"
+					? `${initialContent.length} chars`
+					: `${initialContent.length} blocks`;
+			log(`Got new message (${preview}), starting new query`);
 		}
 	} catch (err) {
 		const errorMessage = err instanceof Error ? err.message : String(err);

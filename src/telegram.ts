@@ -3,6 +3,14 @@ import { TELEGRAM_POLL_TIMEOUT } from "./config.ts";
 
 const log = pino({ name: "telegram" });
 
+export interface TelegramPhotoSize {
+	file_id: string;
+	file_unique_id: string;
+	width: number;
+	height: number;
+	file_size?: number;
+}
+
 export interface TelegramUpdate {
 	update_id: number;
 	message?: {
@@ -11,17 +19,21 @@ export interface TelegramUpdate {
 		chat: { id: number; type: string };
 		date: number;
 		text?: string;
+		photo?: TelegramPhotoSize[];
+		caption?: string;
 	};
 }
 
 export class TelegramClient {
 	private readonly apiBase: string;
+	private readonly botToken: string;
 
 	constructor(
 		public readonly name: string,
 		botToken: string,
 		public readonly allowedUserId: string,
 	) {
+		this.botToken = botToken;
 		this.apiBase = `https://api.telegram.org/bot${botToken}`;
 	}
 
@@ -75,6 +87,24 @@ export class TelegramClient {
 		commands: Array<{ command: string; description: string }>,
 	): Promise<void> {
 		await this.api("setMyCommands", { commands });
+	}
+
+	async getFile(
+		fileId: string,
+	): Promise<{ file_id: string; file_path: string }> {
+		return this.api<{ file_id: string; file_path: string }>("getFile", {
+			file_id: fileId,
+		});
+	}
+
+	async downloadFile(filePath: string): Promise<Buffer> {
+		const url = `https://api.telegram.org/file/bot${this.botToken}/${filePath}`;
+		const res = await fetch(url);
+		if (!res.ok)
+			throw new Error(
+				`Failed to download file: ${res.status} ${res.statusText}`,
+			);
+		return Buffer.from(await res.arrayBuffer());
 	}
 
 	async sendChatAction(

@@ -15,7 +15,11 @@ import {
 	SEEDS_DIR,
 	WORKSPACES_DIR,
 } from "./config.ts";
-import type { ContainerInput, ContainerOutput } from "./types.ts";
+import type {
+	ContainerInput,
+	ContainerOutput,
+	ImageAttachment,
+} from "./types.ts";
 
 const log = pino({ name: "container-runner" });
 
@@ -437,12 +441,14 @@ export function writeIpcInput(
 	containerName: string,
 	text: string,
 	from?: { name: string; source: string } | undefined,
+	images?: ImageAttachment[] | undefined,
 ): void {
 	const inputDir = path.join(chatDir(chatId), "ipc", "input", containerName);
 	mkdirAll(inputDir);
 	const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
 	const payload: Record<string, unknown> = { type: "message", text };
 	if (from) payload["from"] = from;
+	if (images && images.length > 0) payload["images"] = images;
 	fs.writeFileSync(path.join(inputDir, filename), JSON.stringify(payload));
 }
 

@@ -6,6 +6,13 @@ export interface BotConfig {
 	anthropicApiKey: string;
 }
 
+export interface ImageAttachment {
+	/** Base64-encoded image data */
+	data: string;
+	/** MIME type (e.g. "image/jpeg", "image/png") */
+	mediaType: string;
+}
+
 export interface ContainerInput {
 	prompt: string;
 	sessionId?: string | undefined;
@@ -15,6 +22,7 @@ export interface ContainerInput {
 	secrets?: Record<string, string> | undefined;
 	model?: string | undefined;
 	anthropicApiKey?: string | undefined;
+	images?: ImageAttachment[] | undefined;
 }
 
 export interface ContainerOutput {
