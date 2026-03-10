@@ -3,6 +3,7 @@ export interface BotConfig {
 	botToken: string;
 	allowedUserId: string;
 	defaultModel?: string | undefined;
+	anthropicApiKey: string;
 }
 
 export interface ContainerInput {
@@ -13,6 +14,7 @@ export interface ContainerInput {
 	caller?: { name: string; source: "telegram" | "scheduler" } | undefined;
 	secrets?: Record<string, string> | undefined;
 	model?: string | undefined;
+	anthropicApiKey?: string | undefined;
 }
 
 export interface ContainerOutput {

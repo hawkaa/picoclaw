@@ -247,13 +247,15 @@ async function startContainer(
 	const sessions = readSessions();
 	const session = sessions[chatId];
 	const sessionId = session?.sessionId || undefined;
-	const model = session?.model ?? botConfigForChat(chatId)?.defaultModel;
+	const botConfig = botConfigForChat(chatId);
+	const model = session?.model ?? botConfig?.defaultModel;
+	const anthropicApiKey = botConfig?.anthropicApiKey;
 
 	await dispatchChatAction(chatId);
 
 	const { proc, containerName, result } = await spawnContainer(
 		chatId,
-		{ prompt, sessionId, chatId, caller, model },
+		{ prompt, sessionId, chatId, caller, model, anthropicApiKey },
 		(output) => handleOutput(chatId, output),
 	);
 
@@ -425,12 +427,14 @@ async function spawnEphemeral(
 		source: "scheduler" as const,
 	};
 
+	const anthropicApiKey = botConfigForChat(chatId)?.anthropicApiKey;
 	const { result } = await spawnContainer(chatId, {
 		prompt,
 		chatId,
 		isScheduledTask: true,
 		caller,
 		model: task.model,
+		anthropicApiKey,
 	});
 	const output = await result;
 	await commitWorkspace(chatId, {

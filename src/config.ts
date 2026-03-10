@@ -44,6 +44,11 @@ export function loadBotConfigs(): BotConfig[] {
 			entry.defaultModel = entry.anthropicModel;
 			delete entry.anthropicModel;
 		}
+		if (!entry.anthropicApiKey) {
+			throw new Error(
+				`Bot "${entry.name}" is missing required "anthropicApiKey" in bots.json`,
+			);
+		}
 	}
 	return raw as BotConfig[];
 }

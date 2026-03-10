@@ -44,17 +44,15 @@ function chmodRecursive(dir: string): void {
 }
 
 function readSecrets(
+	anthropicApiKey: string,
 	modelOverride?: string | undefined,
 ): Record<string, string> {
 	const secrets: Record<string, string> = {};
-	for (const key of [
-		"CLAUDE_CODE_OAUTH_TOKEN",
-		"ANTHROPIC_API_KEY",
-		"ANTHROPIC_MODEL",
-	]) {
+	for (const key of ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_MODEL"]) {
 		const val = process.env[key];
 		if (val) secrets[key] = val;
 	}
+	secrets["ANTHROPIC_API_KEY"] = anthropicApiKey;
 	if (modelOverride) {
 		secrets["ANTHROPIC_MODEL"] = modelOverride;
 	}
@@ -299,7 +297,8 @@ export async function spawnContainer(
 	log.info({ chatId, logFile: currentLogFile }, "Container session started");
 
 	// Pass secrets via stdin
-	input.secrets = readSecrets(input.model);
+	input.secrets = readSecrets(input.anthropicApiKey!, input.model);
+	input.anthropicApiKey = undefined;
 	proc.stdin?.write(JSON.stringify(input));
 	proc.stdin?.end();
 	input.secrets = undefined;
