@@ -12,7 +12,6 @@ import {
 } from "./config.ts";
 import {
 	cleanupOrphanedContainers,
-	clearSessionFiles,
 	ensureIpcDirs,
 	ensureSessionsDir,
 	seedWorkspace,
@@ -395,7 +394,6 @@ async function handleMessage(
 			delete sessions[chatId];
 		}
 		writeSessions(sessions);
-		clearSessionFiles(chatId);
 
 		const effectiveModel =
 			model ??

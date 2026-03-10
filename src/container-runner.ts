@@ -81,28 +81,6 @@ export function seedWorkspace(chatId: string): void {
 	}
 }
 
-/**
- * Clear Claude session transcript files so the next container starts a fresh
- * conversation. Preserves the directory itself, settings.json, and any
- * non-session data (agents/, etc.) — only JSONL transcript files are removed.
- *
- * Passing an empty sessionId in sessions.json is sufficient to make the SDK
- * start a new conversation; this function just removes stale transcript files
- * to avoid unbounded disk growth.
- */
-export function clearSessionFiles(chatId: string): void {
-	const sessionsDir = path.join(chatDir(chatId), "sessions");
-	if (!fs.existsSync(sessionsDir)) return;
-	let removed = 0;
-	for (const entry of fs.readdirSync(sessionsDir, { withFileTypes: true })) {
-		if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-			fs.unlinkSync(path.join(sessionsDir, entry.name));
-			removed++;
-		}
-	}
-	log.info({ chatId, removed }, "Session transcript files cleared");
-}
-
 export function ensureSessionsDir(chatId: string): void {
 	const sessionsDir = path.join(chatDir(chatId), "sessions");
 	mkdirAll(sessionsDir);
