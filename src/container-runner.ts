@@ -48,11 +48,13 @@ function readSecrets(
 	modelOverride?: string | undefined,
 ): Record<string, string> {
 	const secrets: Record<string, string> = {};
-	for (const key of ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_MODEL"]) {
-		const val = process.env[key];
-		if (val) secrets[key] = val;
+	const envModel = process.env["ANTHROPIC_MODEL"];
+	if (envModel) secrets["ANTHROPIC_MODEL"] = envModel;
+	if (anthropicApiKey.startsWith("sk-ant-oat")) {
+		secrets["CLAUDE_CODE_OAUTH_TOKEN"] = anthropicApiKey;
+	} else {
+		secrets["ANTHROPIC_API_KEY"] = anthropicApiKey;
 	}
-	secrets["ANTHROPIC_API_KEY"] = anthropicApiKey;
 	if (modelOverride) {
 		secrets["ANTHROPIC_MODEL"] = modelOverride;
 	}
