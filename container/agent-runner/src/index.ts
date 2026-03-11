@@ -436,6 +436,20 @@ async function main(): Promise<void> {
 		systemPrompt += `\n\nSession context:\n${contextLines.join("\n")}`;
 	}
 
+	// Load working memory file if it exists
+	const workingMemoryPath = "/workspace/.state/working-memory.md";
+	try {
+		if (fs.existsSync(workingMemoryPath)) {
+			const workingMemory = fs.readFileSync(workingMemoryPath, "utf-8").trim();
+			if (workingMemory) {
+				systemPrompt += `\n\n# Working Memory (last 3 days)\n${workingMemory}`;
+				log(`Loaded working memory (${workingMemory.length} chars)`);
+			}
+		}
+	} catch (err) {
+		log(`Failed to read working memory: ${err instanceof Error ? err.message : String(err)}`);
+	}
+
 	if (containerInput.isScheduledTask) {
 		systemPrompt +=
 			"\nThis is a scheduled task. Your last text output will be sent to the user on Telegram. If you need a follow-up, make sure to remember what needs following up, as any response to your message will start in a new session.";
