@@ -83,6 +83,66 @@ export class TelegramClient {
 		}
 	}
 
+	/**
+	 * Send a message and return its message_id.
+	 * Used to start a streaming edit-in-place sequence.
+	 * Truncates to 4000 chars (leaves room for Telegram overhead).
+	 * Returns null on failure (caller falls back to sendMessage).
+	 */
+	async sendMessageForStream(
+		chatId: number | string,
+		text: string,
+	): Promise<number | null> {
+		const safe = text.length > 4000 ? `${text.slice(0, 4000)}…` : text;
+		try {
+			const result = await this.api<{ message_id: number }>("sendMessage", {
+				chat_id: chatId,
+				text: safe,
+				parse_mode: "Markdown",
+			});
+			return result.message_id;
+		} catch {
+			try {
+				const result = await this.api<{ message_id: number }>("sendMessage", {
+					chat_id: chatId,
+					text: safe,
+				});
+				return result.message_id;
+			} catch (err) {
+				log.warn({ err, chatId }, "sendMessageForStream failed");
+				return null;
+			}
+		}
+	}
+
+	/**
+	 * Edit an existing message in-place.
+	 * Truncates text to 4000 chars to stay within Telegram's limit.
+	 * Throws on failure so callers can decide whether to fall back.
+	 */
+	async editMessageText(
+		chatId: number | string,
+		messageId: number,
+		text: string,
+	): Promise<void> {
+		const safe = text.length > 4000 ? `${text.slice(0, 4000)}…` : text;
+		try {
+			await this.api("editMessageText", {
+				chat_id: chatId,
+				message_id: messageId,
+				text: safe,
+				parse_mode: "Markdown",
+			});
+		} catch {
+			// Retry without Markdown
+			await this.api("editMessageText", {
+				chat_id: chatId,
+				message_id: messageId,
+				text: safe,
+			});
+		}
+	}
+
 	async setMyCommands(
 		commands: Array<{ command: string; description: string }>,
 	): Promise<void> {
