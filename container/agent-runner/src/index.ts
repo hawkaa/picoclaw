@@ -402,6 +402,15 @@ async function main(): Promise<void> {
 		sdkEnv[key] = value;
 	}
 
+	// Expose session metadata as env vars for hooks and scripts
+	sdkEnv["PICOCLAW_SESSION_TYPE"] = containerInput.isScheduledTask
+		? "cron"
+		: "interactive";
+	if (containerInput.caller) {
+		sdkEnv["PICOCLAW_USER"] = containerInput.caller.name;
+		sdkEnv["PICOCLAW_SOURCE"] = containerInput.caller.source;
+	}
+
 	let sessionId = containerInput.sessionId;
 	fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
 
