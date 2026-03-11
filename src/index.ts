@@ -650,20 +650,43 @@ async function spawnEphemeral(
 	};
 
 	const anthropicApiKey = botConfigForChat(chatId)?.anthropicApiKey;
-	const { result } = await spawnContainer(chatId, {
-		prompt,
+
+	// We use an onOutput callback so we can detect when the query
+	// completes and signal the container to exit gracefully — this
+	// gives Claude Code SessionEnd hooks a chance to fire.
+	let sessionId: string | undefined;
+
+	const { containerName, result } = await spawnContainer(
 		chatId,
-		isScheduledTask: true,
-		caller,
-		model: task.model,
-		anthropicApiKey,
-	});
+		{
+			prompt,
+			chatId,
+			isScheduledTask: true,
+			caller,
+			model: task.model,
+			anthropicApiKey,
+		},
+		async (output) => {
+			if (output.newSessionId) sessionId = output.newSessionId;
+			if (output.type === "result") {
+				// Query complete — signal container to exit gracefully so
+				// Claude Code SessionEnd hooks (e.g. session summaries) run.
+				writeCloseSentinel(chatId, containerName);
+			}
+		},
+	);
+
 	const output = await result;
 	await commitWorkspace(chatId, {
 		caller,
 		prompt,
 	}).catch(() => {});
-	return output;
+
+	return {
+		...output,
+		result: null,
+		newSessionId: sessionId ?? output.newSessionId,
+	};
 }
 
 // --- Polling loop per bot ---
