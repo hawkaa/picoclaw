@@ -13,8 +13,8 @@ export const CONTAINER_DIR = path.join(PROJECT_ROOT, "container");
 export const SEEDS_DIR = path.join(CONTAINER_DIR, "seeds");
 
 export const CONTAINER_BASE_IMAGE = "picoclaw-base:latest";
-export const CONTAINER_TIMEOUT = 30 * 60 * 1000; // 30 min hard timeout
-export const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 min idle → close
+export const CONTAINER_TIMEOUT = 60 * 60 * 1000; // 60 min hard timeout
+export const IDLE_TIMEOUT = 60 * 60 * 1000; // 60 min idle → close
 export const IPC_POLL_INTERVAL = 1000; // 1s
 export const TASK_CHECK_INTERVAL = 60 * 1000; // 60s
 export const TELEGRAM_POLL_TIMEOUT = 30; // seconds
