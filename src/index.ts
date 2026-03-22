@@ -242,14 +242,28 @@ async function handleStreamingChunk(
 	existing.accumulatedText += `\n\n${newText}`;
 
 	// If text overflowed what we can show in a single Telegram message,
-	// abandon the streaming message and send this chunk normally.
+	// finalize the streamed message and send the overflow as new message(s).
 	if (existing.accumulatedText.length > 4000 && client) {
 		if (existing.pendingEdit) {
 			clearTimeout(existing.pendingEdit);
 			existing.pendingEdit = null;
 		}
+		const fullText = existing.accumulatedText;
 		streamingStates.delete(chatId);
-		await dispatchMessage(chatId, newText);
+
+		// Final edit: ensure the streamed message shows the first 4000 chars.
+		try {
+			await client.editMessageText(chatId, existing.messageId, fullText);
+		} catch {
+			// editMessageText truncates internally — best effort.
+		}
+
+		// Send everything beyond 4000 chars as new message(s).
+		// dispatchMessage → sendMessage handles splitting at 4096 on newlines.
+		const overflow = fullText.slice(4000).trimStart();
+		if (overflow) {
+			await dispatchMessage(chatId, overflow);
+		}
 		return;
 	}
 
@@ -298,9 +312,10 @@ async function finalizeStreaming(chatId: string): Promise<void> {
 
 	streamingStates.delete(chatId);
 
-	// Perform a final edit to ensure the latest text is shown.
 	const client = clientsByChatId.get(chatId);
 	if (!client) return;
+
+	// Perform a final edit to ensure the latest text is shown.
 	try {
 		await client.editMessageText(
 			chatId,
@@ -309,6 +324,15 @@ async function finalizeStreaming(chatId: string): Promise<void> {
 		);
 	} catch (err) {
 		log.warn({ err, chatId }, "Final streaming editMessageText failed");
+	}
+
+	// editMessageText truncates at 4000 chars. If accumulated text is longer,
+	// send the overflow as new message(s) so no content is lost.
+	if (state.accumulatedText.length > 4000) {
+		const overflow = state.accumulatedText.slice(4000).trimStart();
+		if (overflow) {
+			await dispatchMessage(chatId, overflow);
+		}
 	}
 }
 
