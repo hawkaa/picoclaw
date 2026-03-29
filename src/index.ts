@@ -7,6 +7,7 @@ import {
 	IDLE_TIMEOUT,
 	loadBotConfigs,
 	MODEL_ALIASES,
+	parseEffortLevel,
 	resolveModelId,
 	WORKSPACES_DIR,
 } from "./config.ts";
@@ -27,6 +28,7 @@ import type {
 	BotConfig,
 	ContainerOutput,
 	ContainerState,
+	EffortLevel,
 	ImageAttachment,
 	ScheduledTask,
 	SessionData,
@@ -418,13 +420,14 @@ async function startContainer(
 	const sessionId = session?.sessionId || undefined;
 	const botConfig = botConfigForChat(chatId);
 	const model = session?.model ?? botConfig?.defaultModel;
+	const effort = session?.effort;
 	const anthropicApiKey = botConfig?.anthropicApiKey;
 
 	await dispatchChatAction(chatId);
 
 	const { proc, containerName, result } = await spawnContainer(
 		chatId,
-		{ prompt, sessionId, chatId, caller, model, anthropicApiKey, images },
+		{ prompt, sessionId, chatId, caller, model, anthropicApiKey, images, effort },
 		async (output) => {
 			// Drop output (including session writes) from containers that were
 			// superseded by a /new reset after this container was spawned.
@@ -634,6 +637,42 @@ async function handleMessage(
 		return;
 	}
 
+	// /effort command: set reasoning effort for current session
+	if (text === "/effort" || text.startsWith("/effort ")) {
+		const arg = text.slice("/effort".length).trim();
+
+		if (!arg) {
+			const sessions = readSessions();
+			const current = sessions[chatId]?.effort ?? "high (default)";
+			await client.sendMessage(
+				chatId,
+				`Current effort: ${current}\nUsage: /effort low|medium|high|max`,
+			);
+			return;
+		}
+
+		const effort = parseEffortLevel(arg);
+		if (!effort) {
+			await client.sendMessage(
+				chatId,
+				`Unknown effort level "${arg}". Valid: low, medium, high, max`,
+			);
+			return;
+		}
+
+		const sessions = readSessions();
+		if (!sessions[chatId]) {
+			sessions[chatId] = {
+				sessionId: "",
+				lastActivity: new Date().toISOString(),
+			};
+		}
+		sessions[chatId].effort = effort;
+		writeSessions(sessions);
+		await client.sendMessage(chatId, `Effort set to: ${effort}`);
+		return;
+	}
+
 	const callerName = msg.from.username ?? msg.from.first_name ?? "unknown";
 	const caller = { name: callerName, source: "telegram" as const };
 
@@ -655,7 +694,7 @@ async function handleMessage(
 async function spawnEphemeral(
 	chatId: string,
 	prompt: string,
-	task: { id: string; label?: string | undefined; model?: string | undefined },
+	task: { id: string; label?: string | undefined; model?: string | undefined; effort?: EffortLevel | undefined },
 ): Promise<ContainerOutput> {
 	seedWorkspace(chatId);
 	ensureWorkspaceGit(chatId);
@@ -689,6 +728,7 @@ async function spawnEphemeral(
 			caller,
 			model: task.model,
 			anthropicApiKey,
+			effort: task.effort,
 		},
 		async (output) => {
 			if (output.newSessionId) sessionId = output.newSessionId;

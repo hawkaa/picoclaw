@@ -20,6 +20,8 @@ interface ImageAttachment {
 	mediaType: string;
 }
 
+type EffortLevel = "low" | "medium" | "high" | "max";
+
 interface ContainerInput {
 	prompt: string;
 	sessionId?: string;
@@ -28,6 +30,7 @@ interface ContainerInput {
 	caller?: { name: string; source: "telegram" | "scheduler" };
 	secrets?: Record<string, string>;
 	images?: ImageAttachment[];
+	effort?: EffortLevel;
 }
 
 interface ContainerOutput {
@@ -255,6 +258,7 @@ async function runQuery(
 	sdkEnv: Record<string, string | undefined>,
 	systemPrompt: string,
 	resumeAt?: string,
+	effort?: EffortLevel,
 ): Promise<{
 	newSessionId?: string;
 	lastAssistantUuid?: string;
@@ -320,6 +324,7 @@ async function runQuery(
 			permissionMode: "bypassPermissions",
 			allowDangerouslySkipPermissions: true,
 			settingSources: ["project", "user"],
+			...(effort ? { effort } : {}),
 			hooks: {
 				PreToolUse: [{ matcher: "Bash", hooks: [createSanitizeBashHook()] }],
 			},
@@ -410,6 +415,9 @@ async function main(): Promise<void> {
 		sdkEnv["PICOCLAW_USER"] = containerInput.caller.name;
 		sdkEnv["PICOCLAW_SOURCE"] = containerInput.caller.source;
 	}
+	if (containerInput.effort) {
+		sdkEnv["PICOCLAW_EFFORT"] = containerInput.effort;
+	}
 
 	let sessionId = containerInput.sessionId;
 	fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
@@ -431,6 +439,9 @@ async function main(): Promise<void> {
 	const activeModel = sdkEnv["ANTHROPIC_MODEL"];
 	if (activeModel) {
 		contextLines.push(`Model: ${activeModel}`);
+	}
+	if (containerInput.effort) {
+		contextLines.push(`Effort: ${containerInput.effort}`);
 	}
 	if (contextLines.length > 0) {
 		systemPrompt += `\n\nSession context:\n${contextLines.join("\n")}`;
@@ -481,6 +492,7 @@ async function main(): Promise<void> {
 				sdkEnv,
 				systemPrompt,
 				resumeAt,
+				containerInput.effort,
 			);
 			if (queryResult.newSessionId) sessionId = queryResult.newSessionId;
 			if (queryResult.lastAssistantUuid)

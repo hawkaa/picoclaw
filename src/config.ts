@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { BotConfig } from "./types.ts";
+import type { BotConfig, EffortLevel } from "./types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -27,6 +27,13 @@ export const MODEL_ALIASES: Record<string, string> = {
 
 export function resolveModelId(alias: string): string {
 	return MODEL_ALIASES[alias.toLowerCase()] ?? alias;
+}
+
+const VALID_EFFORT_LEVELS = new Set<EffortLevel>(["low", "medium", "high", "max"]);
+
+export function parseEffortLevel(value: string): EffortLevel | null {
+	const lower = value.toLowerCase() as EffortLevel;
+	return VALID_EFFORT_LEVELS.has(lower) ? lower : null;
 }
 
 export function loadBotConfigs(): BotConfig[] {

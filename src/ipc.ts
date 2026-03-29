@@ -6,10 +6,11 @@ import pino from "pino";
 import {
 	DATA_DIR,
 	IPC_POLL_INTERVAL,
+	parseEffortLevel,
 	resolveModelId,
 	WORKSPACES_DIR,
 } from "./config.ts";
-import type { ScheduledTask } from "./types.ts";
+import type { EffortLevel, ScheduledTask } from "./types.ts";
 
 const log = pino({ name: "ipc" });
 
@@ -189,6 +190,7 @@ function processTaskIpc(
 		status?: string;
 		chatId?: string;
 		model?: string;
+		effort?: string;
 	},
 	sourceChatId: string,
 	deps: IpcDeps,
@@ -196,6 +198,9 @@ function processTaskIpc(
 	const tasks = deps.readTasks();
 	const chatId = data.chatId || sourceChatId;
 	if (data.model) data.model = resolveModelId(data.model);
+	const effort: EffortLevel | undefined = data.effort
+		? (parseEffortLevel(data.effort) ?? undefined)
+		: undefined;
 
 	switch (data.type) {
 		case "schedule": {
@@ -221,6 +226,7 @@ function processTaskIpc(
 					existing.status = "active";
 					if (data.model !== undefined)
 						existing.model = data.model || undefined;
+					if (effort !== undefined) existing.effort = effort;
 					deps.writeTasks(tasks);
 					deps.writeSnapshot(
 						chatId,
@@ -245,6 +251,7 @@ function processTaskIpc(
 				status: "active",
 				created_at: new Date().toISOString(),
 				...(data.model ? { model: data.model } : {}),
+				...(effort ? { effort } : {}),
 			};
 			tasks.push(task);
 			deps.writeTasks(tasks);
@@ -270,6 +277,7 @@ function processTaskIpc(
 				task.status = data.status;
 			}
 			if (data.model !== undefined) task.model = data.model || undefined;
+			if (effort !== undefined) task.effort = effort;
 			if (data.schedule_type && data.schedule_value) {
 				const nextRun = computeNextRun(data.schedule_type, data.schedule_value);
 				if (nextRun !== null) {

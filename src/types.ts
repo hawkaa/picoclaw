@@ -13,6 +13,8 @@ export interface ImageAttachment {
 	mediaType: string;
 }
 
+export type EffortLevel = "low" | "medium" | "high" | "max";
+
 export interface ContainerInput {
 	prompt: string;
 	sessionId?: string | undefined;
@@ -23,6 +25,7 @@ export interface ContainerInput {
 	model?: string | undefined;
 	anthropicApiKey?: string | undefined;
 	images?: ImageAttachment[] | undefined;
+	effort?: EffortLevel | undefined;
 }
 
 export interface ContainerOutput {
@@ -52,10 +55,12 @@ export interface ScheduledTask {
 	status: "active" | "paused";
 	created_at: string;
 	model?: string | undefined;
+	effort?: EffortLevel | undefined;
 }
 
 export interface SessionData {
 	sessionId: string;
 	lastActivity: string;
 	model?: string | undefined;
+	effort?: EffortLevel | undefined;
 }
