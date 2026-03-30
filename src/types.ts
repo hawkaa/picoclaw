@@ -21,6 +21,7 @@ export interface ContainerInput {
 	caller?: { name: string; source: "telegram" | "scheduler" } | undefined;
 	secrets?: Record<string, string> | undefined;
 	model?: string | undefined;
+	effort?: string | undefined;
 	anthropicApiKey?: string | undefined;
 	images?: ImageAttachment[] | undefined;
 }
@@ -52,6 +53,7 @@ export interface ScheduledTask {
 	status: "active" | "paused";
 	created_at: string;
 	model?: string | undefined;
+	effort?: string | undefined;
 }
 
 export interface SessionData {

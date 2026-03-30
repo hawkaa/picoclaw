@@ -110,6 +110,24 @@ const sessionResets = new Map<string, number>();
 
 const TYPING_INTERVAL = 4000;
 
+// --- Streaming edit-in-place state ---
+interface StreamingState {
+	/** ID of the placeholder message being edited. */
+	messageId: number;
+	/** Full accumulated text so far (may be truncated in the Telegram message). */
+	accumulatedText: string;
+	/** Timestamp of the last successful edit, for throttling. */
+	lastEditAt: number;
+	/** Scheduled throttle timer, if one is pending. */
+	pendingEdit: ReturnType<typeof setTimeout> | null;
+}
+
+/** One streaming session per chatId. Cleared on turn completion. */
+const streamingStates = new Map<string, StreamingState>();
+
+/** Minimum ms between editMessageText calls (Telegram rate limit: ~1/s per chat). */
+const STREAM_EDIT_THROTTLE_MS = 500;
+
 // --- Persistence helpers ---
 function sessionsFile(): string {
 	return path.join(DATA_DIR, "sessions.json");
@@ -186,6 +204,138 @@ function resetIdleTimer(chatId: string): void {
 	);
 }
 
+/**
+ * Handle a streaming text chunk using edit-in-place.
+ *
+ * - First chunk: sends a new message and stores its ID.
+ * - Subsequent chunks: accumulates text and throttles edits to one per
+ *   STREAM_EDIT_THROTTLE_MS (Telegram rate limit is ~1 edit/s per chat).
+ * - Falls back to dispatchMessage if the initial send fails.
+ */
+async function handleStreamingChunk(
+	chatId: string,
+	newText: string,
+): Promise<void> {
+	const client = clientsByChatId.get(chatId);
+	const existing = streamingStates.get(chatId);
+
+	if (!existing) {
+		// First chunk — send initial message and store the message ID.
+		if (client) {
+			const messageId = await client.sendMessageForStream(chatId, newText);
+			if (messageId !== null) {
+				streamingStates.set(chatId, {
+					messageId,
+					accumulatedText: newText,
+					lastEditAt: Date.now(),
+					pendingEdit: null,
+				});
+				return;
+			}
+		}
+		// No client or initial send failed — fall back to plain send.
+		await dispatchMessage(chatId, newText);
+		return;
+	}
+
+	// Accumulate the new chunk.
+	existing.accumulatedText += `\n\n${newText}`;
+
+	// If text overflowed what we can show in a single Telegram message,
+	// finalize the streamed message and send the overflow as new message(s).
+	if (existing.accumulatedText.length > 4000 && client) {
+		if (existing.pendingEdit) {
+			clearTimeout(existing.pendingEdit);
+			existing.pendingEdit = null;
+		}
+		const fullText = existing.accumulatedText;
+		streamingStates.delete(chatId);
+
+		// Final edit: ensure the streamed message shows the first 4000 chars.
+		try {
+			await client.editMessageText(chatId, existing.messageId, fullText);
+		} catch {
+			// editMessageText truncates internally — best effort.
+		}
+
+		// Send everything beyond 4000 chars as new message(s).
+		// dispatchMessage → sendMessage handles splitting at 4096 on newlines.
+		const overflow = fullText.slice(4000).trimStart();
+		if (overflow) {
+			await dispatchMessage(chatId, overflow);
+		}
+		return;
+	}
+
+	// Throttled edit.
+	if (existing.pendingEdit) return; // already scheduled
+
+	const elapsed = Date.now() - existing.lastEditAt;
+	const doEdit = async () => {
+		existing.pendingEdit = null;
+		const state = streamingStates.get(chatId);
+		if (!state || !client) return;
+		try {
+			await client.editMessageText(
+				chatId,
+				state.messageId,
+				state.accumulatedText,
+			);
+			state.lastEditAt = Date.now();
+		} catch (err) {
+			log.warn({ err, chatId }, "Streaming editMessageText failed");
+		}
+	};
+
+	if (elapsed >= STREAM_EDIT_THROTTLE_MS) {
+		await doEdit();
+	} else {
+		existing.pendingEdit = setTimeout(() => {
+			doEdit().catch(() => {});
+		}, STREAM_EDIT_THROTTLE_MS - elapsed);
+	}
+}
+
+/**
+ * Flush any pending streaming edit and clean up state for this chat.
+ * Called when a turn completes (type:"result") or a container exits.
+ */
+async function finalizeStreaming(chatId: string): Promise<void> {
+	const state = streamingStates.get(chatId);
+	if (!state) return;
+
+	// Cancel any scheduled edit.
+	if (state.pendingEdit) {
+		clearTimeout(state.pendingEdit);
+		state.pendingEdit = null;
+	}
+
+	streamingStates.delete(chatId);
+
+	const client = clientsByChatId.get(chatId);
+	if (!client) return;
+
+	// Perform a final edit to ensure the latest text is shown.
+	try {
+		await client.editMessageText(
+			chatId,
+			state.messageId,
+			state.accumulatedText,
+		);
+	} catch (err) {
+		log.warn({ err, chatId }, "Final streaming editMessageText failed");
+	}
+
+	// editMessageText truncates at 4000 chars. If accumulated text is longer,
+	// send the overflow as new message(s) so no content is lost.
+	if (state.accumulatedText.length > 4000) {
+		const overflow = state.accumulatedText.slice(4000).trimStart();
+		if (overflow) {
+			await dispatchMessage(chatId, overflow);
+		}
+	}
+}
+
 async function handleOutput(
 	chatId: string,
 	output: ContainerOutput,
@@ -205,8 +355,18 @@ async function handleOutput(
 		if (state) state.sessionId = output.newSessionId;
 	}
 
-	// Send result to Telegram
-	if (output.result) {
+	// Route text chunks through the streaming path; everything else uses plain send.
+	if (output.type === "text" && output.result) {
+		log.info(
+			{
+				chatId,
+				resultLength: output.result.length,
+				preview: output.result.slice(0, 200),
+			},
+			"Streaming text chunk to Telegram",
+		);
+		await handleStreamingChunk(chatId, output.result);
+	} else if (output.result) {
 		log.info(
 			{
 				chatId,
@@ -220,8 +380,9 @@ async function handleOutput(
 		log.debug({ chatId }, "Output with null result (session update only)");
 	}
 
-	// Only stop typing on final result, not streaming text blocks
+	// Finalize streaming and stop typing on turn completion.
 	if (output.type !== "text") {
+		await finalizeStreaming(chatId);
 		stopTyping(chatId);
 	}
 
@@ -285,8 +446,10 @@ async function startContainer(
 
 	// When container exits, clean up
 	result
-		.then((finalOutput) => {
+		.then(async (finalOutput) => {
 			containers.delete(chatId);
+			// Flush any in-flight streaming state before stopping the typing indicator.
+			await finalizeStreaming(chatId);
 			stopTyping(chatId);
 			const timer = idleTimers.get(chatId);
 			if (timer) {
@@ -368,21 +531,45 @@ async function handleMessage(
 	// Register chatId → client routing
 	clientsByChatId.set(chatId, client);
 
+	// Acknowledge receipt immediately with a reaction (fire-and-forget).
+	// This gives Håkon instant visual feedback that the message was received,
+	// before the agent container even starts.
+	client.setMessageReaction(chatId, msg.message_id).catch(() => {});
+
 	const text = (msg.text ?? msg.caption ?? "").trim();
 
 	// Download photo if present
 	let images: ImageAttachment[] | undefined;
 	if (msg.photo && msg.photo.length > 0) {
 		try {
-			// Telegram provides multiple sizes; pick the largest (last in array)
-			const largest = msg.photo.at(-1);
-			if (!largest) throw new Error("Photo array unexpectedly empty");
-			const fileInfo = await client.getFile(largest.file_id);
+			// Telegram provides multiple sizes; pick the largest within safe limits.
+			// Anthropic API rejects images with dimensions > 8000px on either axis.
+			const MAX_DIM = 7680;
+			// Photos are sorted smallest → largest; iterate in reverse to find
+			// the biggest one that fits within the dimension limit.
+			const sorted = [...msg.photo].reverse();
+			const chosen =
+				sorted.find((p) => p.width <= MAX_DIM && p.height <= MAX_DIM) ??
+				sorted[sorted.length - 1]; // fallback: use smallest if all are too large
+			if (!chosen) throw new Error("Photo array unexpectedly empty");
+			if (chosen.width > MAX_DIM || chosen.height > MAX_DIM) {
+				log.warn(
+					{ chatId, width: chosen.width, height: chosen.height, MAX_DIM },
+					"Photo exceeds max dimension; using smallest available size",
+				);
+			}
+			const fileInfo = await client.getFile(chosen.file_id);
 			const buffer = await client.downloadFile(fileInfo.file_path);
 			const mediaType = inferMediaType(fileInfo.file_path);
 			images = [{ data: buffer.toString("base64"), mediaType }];
 			log.info(
-				{ chatId, fileSize: buffer.length, mediaType },
+				{
+					chatId,
+					fileSize: buffer.length,
+					mediaType,
+					width: chosen.width,
+					height: chosen.height,
+				},
 				"Downloaded Telegram photo",
 			);
 		} catch (err) {
@@ -468,7 +655,12 @@ async function handleMessage(
 async function spawnEphemeral(
 	chatId: string,
 	prompt: string,
-	task: { id: string; label?: string | undefined; model?: string | undefined },
+	task: {
+		id: string;
+		label?: string | undefined;
+		model?: string | undefined;
+		effort?: string | undefined;
+	},
 ): Promise<ContainerOutput> {
 	seedWorkspace(chatId);
 	ensureWorkspaceGit(chatId);
@@ -487,20 +679,70 @@ async function spawnEphemeral(
 	};
 
 	const anthropicApiKey = botConfigForChat(chatId)?.anthropicApiKey;
-	const { result } = await spawnContainer(chatId, {
-		prompt,
-		chatId,
-		isScheduledTask: true,
-		caller,
-		model: task.model,
-		anthropicApiKey,
-	});
-	const output = await result;
-	await commitWorkspace(chatId, {
-		caller,
-		prompt,
-	}).catch(() => {});
-	return output;
+
+	const MAX_ATTEMPTS = 2;
+	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+		// We use an onOutput callback so we can detect when the query
+		// completes and signal the container to exit gracefully — this
+		// gives Claude Code SessionEnd hooks a chance to fire.
+		let sessionId: string | undefined;
+
+		const { containerName, result } = await spawnContainer(
+			chatId,
+			{
+				prompt,
+				chatId,
+				isScheduledTask: true,
+				caller,
+				model: task.model,
+				effort: task.effort,
+				anthropicApiKey,
+			},
+			async (output) => {
+				if (output.newSessionId) sessionId = output.newSessionId;
+				if (output.type === "result") {
+					// Query complete — signal container to exit gracefully so
+					// Claude Code SessionEnd hooks (e.g. session summaries) run.
+					writeCloseSentinel(chatId, containerName);
+				}
+			},
+		);
+
+		const output = await result;
+
+		// Detect pre-init crash: container exited with an error before any
+		// session was initialized (~1-2% of sessions, intermittent SDK bug).
+		// Retry once before reporting the error.
+		const isPreInitCrash =
+			output.status === "error" &&
+			output.error?.includes("exited with code") &&
+			!sessionId &&
+			!output.newSessionId;
+
+		if (isPreInitCrash && attempt < MAX_ATTEMPTS) {
+			log.warn(
+				{ chatId, taskId: task.id, attempt },
+				"[task-scheduler] Session crashed before init, retrying (attempt %d/%d)",
+				attempt + 1,
+				MAX_ATTEMPTS,
+			);
+			continue;
+		}
+
+		await commitWorkspace(chatId, {
+			caller,
+			prompt,
+		}).catch(() => {});
+
+		return {
+			...output,
+			result: null,
+			newSessionId: sessionId ?? output.newSessionId,
+		};
+	}
+
+	// Unreachable, but satisfies TypeScript
+	return { status: "error", result: null, error: "Exhausted retries" };
 }
 
 // --- Polling loop per bot ---

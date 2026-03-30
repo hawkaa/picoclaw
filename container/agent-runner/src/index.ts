@@ -27,6 +27,7 @@ interface ContainerInput {
 	isScheduledTask?: boolean;
 	caller?: { name: string; source: "telegram" | "scheduler" };
 	secrets?: Record<string, string>;
+	effort?: string;
 	images?: ImageAttachment[];
 }
 
@@ -400,6 +401,18 @@ async function main(): Promise<void> {
 	const sdkEnv: Record<string, string | undefined> = { ...process.env };
 	for (const [key, value] of Object.entries(containerInput.secrets || {})) {
 		sdkEnv[key] = value;
+	}
+
+	// Expose session metadata as env vars for hooks and scripts
+	sdkEnv["PICOCLAW_SESSION_TYPE"] = containerInput.isScheduledTask
+		? "cron"
+		: "interactive";
+	if (containerInput.caller) {
+		sdkEnv["PICOCLAW_USER"] = containerInput.caller.name;
+		sdkEnv["PICOCLAW_SOURCE"] = containerInput.caller.source;
+	}
+	if (containerInput.effort) {
+		sdkEnv["CLAUDE_CODE_EFFORT_LEVEL"] = containerInput.effort;
 	}
 
 	let sessionId = containerInput.sessionId;
