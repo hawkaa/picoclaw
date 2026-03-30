@@ -655,7 +655,12 @@ async function handleMessage(
 async function spawnEphemeral(
 	chatId: string,
 	prompt: string,
-	task: { id: string; label?: string | undefined; model?: string | undefined },
+	task: {
+		id: string;
+		label?: string | undefined;
+		model?: string | undefined;
+		effort?: string | undefined;
+	},
 ): Promise<ContainerOutput> {
 	seedWorkspace(chatId);
 	ensureWorkspaceGit(chatId);
@@ -675,42 +680,69 @@ async function spawnEphemeral(
 
 	const anthropicApiKey = botConfigForChat(chatId)?.anthropicApiKey;
 
-	// We use an onOutput callback so we can detect when the query
-	// completes and signal the container to exit gracefully — this
-	// gives Claude Code SessionEnd hooks a chance to fire.
-	let sessionId: string | undefined;
+	const MAX_ATTEMPTS = 2;
+	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+		// We use an onOutput callback so we can detect when the query
+		// completes and signal the container to exit gracefully — this
+		// gives Claude Code SessionEnd hooks a chance to fire.
+		let sessionId: string | undefined;
 
-	const { containerName, result } = await spawnContainer(
-		chatId,
-		{
-			prompt,
+		const { containerName, result } = await spawnContainer(
 			chatId,
-			isScheduledTask: true,
+			{
+				prompt,
+				chatId,
+				isScheduledTask: true,
+				caller,
+				model: task.model,
+				effort: task.effort,
+				anthropicApiKey,
+			},
+			async (output) => {
+				if (output.newSessionId) sessionId = output.newSessionId;
+				if (output.type === "result") {
+					// Query complete — signal container to exit gracefully so
+					// Claude Code SessionEnd hooks (e.g. session summaries) run.
+					writeCloseSentinel(chatId, containerName);
+				}
+			},
+		);
+
+		const output = await result;
+
+		// Detect pre-init crash: container exited with an error before any
+		// session was initialized (~1-2% of sessions, intermittent SDK bug).
+		// Retry once before reporting the error.
+		const isPreInitCrash =
+			output.status === "error" &&
+			output.error?.includes("exited with code") &&
+			!sessionId &&
+			!output.newSessionId;
+
+		if (isPreInitCrash && attempt < MAX_ATTEMPTS) {
+			log.warn(
+				{ chatId, taskId: task.id, attempt },
+				"[task-scheduler] Session crashed before init, retrying (attempt %d/%d)",
+				attempt + 1,
+				MAX_ATTEMPTS,
+			);
+			continue;
+		}
+
+		await commitWorkspace(chatId, {
 			caller,
-			model: task.model,
-			anthropicApiKey,
-		},
-		async (output) => {
-			if (output.newSessionId) sessionId = output.newSessionId;
-			if (output.type === "result") {
-				// Query complete — signal container to exit gracefully so
-				// Claude Code SessionEnd hooks (e.g. session summaries) run.
-				writeCloseSentinel(chatId, containerName);
-			}
-		},
-	);
+			prompt,
+		}).catch(() => {});
 
-	const output = await result;
-	await commitWorkspace(chatId, {
-		caller,
-		prompt,
-	}).catch(() => {});
+		return {
+			...output,
+			result: null,
+			newSessionId: sessionId ?? output.newSessionId,
+		};
+	}
 
-	return {
-		...output,
-		result: null,
-		newSessionId: sessionId ?? output.newSessionId,
-	};
+	// Unreachable, but satisfies TypeScript
+	return { status: "error", result: null, error: "Exhausted retries" };
 }
 
 // --- Polling loop per bot ---

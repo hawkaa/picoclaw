@@ -27,6 +27,7 @@ interface ContainerInput {
 	isScheduledTask?: boolean;
 	caller?: { name: string; source: "telegram" | "scheduler" };
 	secrets?: Record<string, string>;
+	effort?: string;
 	images?: ImageAttachment[];
 }
 
@@ -409,6 +410,9 @@ async function main(): Promise<void> {
 	if (containerInput.caller) {
 		sdkEnv["PICOCLAW_USER"] = containerInput.caller.name;
 		sdkEnv["PICOCLAW_SOURCE"] = containerInput.caller.source;
+	}
+	if (containerInput.effort) {
+		sdkEnv["CLAUDE_CODE_EFFORT_LEVEL"] = containerInput.effort;
 	}
 
 	let sessionId = containerInput.sessionId;

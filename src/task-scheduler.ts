@@ -18,6 +18,7 @@ export interface SchedulerDeps {
 			id: string;
 			label?: string | undefined;
 			model?: string | undefined;
+			effort?: string | undefined;
 		},
 	) => Promise<ContainerOutput>;
 	sendMessage: (chatId: number | string, text: string) => Promise<void>;
