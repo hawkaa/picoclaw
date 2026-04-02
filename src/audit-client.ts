@@ -1,11 +1,11 @@
 // AgentLair audit client — write-only access from PicoClaw host.
+// Uses @piiiico/agent-logger (https://agentlair.dev/docs/audit-logger).
 // The agent container never receives this API key, so it cannot read the audit trail.
 import fs from "node:fs";
 import pino from "pino";
+import { createAuditLogger } from "@piiiico/agent-logger";
 
 const log = pino({ name: "audit-client" });
-
-const AGENTLAIR_BASE = process.env["AGENTLAIR_URL"] ?? "https://agentlair.dev";
 
 function loadApiKey(): string {
 	const fromEnv = process.env["AGENTLAIR_API_KEY"];
@@ -22,34 +22,20 @@ function loadApiKey(): string {
 	return "";
 }
 
-class AuditClient {
-	private readonly apiKey: string;
+const apiKey = loadApiKey();
 
-	constructor() {
-		this.apiKey = loadApiKey();
-		if (this.apiKey) {
-			log.info("Audit client initialized (AgentLair)");
-		} else {
-			log.warn(
-				"Audit client: no AGENTLAIR_API_KEY found, audit logging disabled",
-			);
-		}
-	}
+if (apiKey) {
+	log.info("Audit client initialized (AgentLair)");
+} else {
+	log.warn("Audit client: no AGENTLAIR_API_KEY found, audit logging disabled");
+}
 
-	private fire(path: string, body: Record<string, unknown>): void {
-		if (!this.apiKey) return;
-		fetch(`${AGENTLAIR_BASE}${path}`, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${this.apiKey}`,
-			},
-			body: JSON.stringify(body),
-		}).catch((err: unknown) => {
-			log.debug({ err, path }, "Audit fire-and-forget failed (ignored)");
-		});
-	}
+const logger = createAuditLogger("picoclaw", {
+	transport: apiKey ? "agentlair" : "silent",
+	agentlairApiKey: apiKey,
+});
 
+export const audit = {
 	sessionStart(opts: {
 		sessionId: string;
 		chatId: string;
@@ -57,23 +43,34 @@ class AuditClient {
 		sessionType?: string | undefined;
 		source?: string | undefined;
 	}): void {
-		this.fire("/v1/sessions/start", {
-			session_id: opts.sessionId,
-			model: opts.model ?? null,
-			session_type: opts.sessionType ?? null,
-			source: opts.source ?? null,
+		logger({
+			action: "session.start",
+			metadata: {
+				session_id: opts.sessionId,
+				chat_id: opts.chatId,
+				model: opts.model ?? null,
+				session_type: opts.sessionType ?? null,
+				source: opts.source ?? null,
+			},
+		}).catch((err: unknown) => {
+			log.debug({ err }, "Audit fire-and-forget failed (ignored)");
 		});
-	}
+	},
 
 	sessionEnd(opts: {
 		sessionId: string;
 		endReason?: string | undefined;
 	}): void {
-		this.fire("/v1/sessions/end", {
-			session_id: opts.sessionId,
-			end_reason: opts.endReason ?? null,
+		logger({
+			action: "session.end",
+			metadata: {
+				session_id: opts.sessionId,
+				end_reason: opts.endReason ?? null,
+			},
+		}).catch((err: unknown) => {
+			log.debug({ err }, "Audit fire-and-forget failed (ignored)");
 		});
-	}
+	},
 
 	event(opts: {
 		sessionId: string;
@@ -81,13 +78,17 @@ class AuditClient {
 		description?: string | undefined;
 		metadata?: Record<string, unknown> | undefined;
 	}): void {
-		this.fire("/v1/sessions/event", {
-			session_id: opts.sessionId,
-			event_type: opts.eventType,
-			description: opts.description ?? null,
-			metadata: opts.metadata ?? null,
+		const toolName = opts.eventType === "tool.use" ? (opts.metadata?.["tool"] as string | undefined) : undefined;
+		logger({
+			action: opts.eventType,
+			...(toolName ? { tool: toolName } : {}),
+			metadata: {
+				session_id: opts.sessionId,
+				description: opts.description ?? null,
+				...opts.metadata,
+			},
+		}).catch((err: unknown) => {
+			log.debug({ err }, "Audit fire-and-forget failed (ignored)");
 		});
-	}
-}
-
-export const audit = new AuditClient();
+	},
+};
