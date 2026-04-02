@@ -33,7 +33,9 @@ export interface ContainerOutput {
 	result: string | null;
 	newSessionId?: string | undefined;
 	error?: string;
-	type?: "text" | "result" | undefined;
+	type?: "text" | "result" | "tool_use" | undefined;
+	toolName?: string | undefined;
+	toolInput?: Record<string, unknown> | undefined;
 }
 
 export interface ContainerState {

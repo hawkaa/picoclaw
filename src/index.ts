@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import pino from "pino";
-
+import { audit } from "./audit-client.ts";
 import {
 	DATA_DIR,
 	IDLE_TIMEOUT,
@@ -109,6 +109,8 @@ const typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 // Tracks the timestamp of the last /new reset per chatId.
 // Used to discard session writes from containers that started before the reset.
 const sessionResets = new Map<string, number>();
+// Tracks session IDs that have already been audited as started.
+const auditedSessions = new Set<string>();
 
 const TYPING_INTERVAL = 4000;
 
@@ -357,6 +359,40 @@ async function handleOutput(
 		if (state) state.sessionId = output.newSessionId;
 	}
 
+	// Audit: log session start on first encounter
+	if (output.newSessionId && !auditedSessions.has(output.newSessionId)) {
+		auditedSessions.add(output.newSessionId);
+		const sessions2 = readSessions();
+		const session2 = sessions2[chatId];
+		const botCfg = botConfigForChat(chatId);
+		audit.sessionStart({
+			sessionId: output.newSessionId,
+			chatId,
+			model: session2?.model ?? botCfg?.defaultModel,
+			sessionType: "interactive",
+			source: "telegram",
+		});
+	}
+
+	// Audit: log tool use events
+	if (output.type === "tool_use" && output.toolName) {
+		const cstate = containers.get(chatId);
+		const sid = cstate?.sessionId ?? output.newSessionId;
+		if (sid) {
+			audit.event({
+				sessionId: sid,
+				eventType: "tool.use",
+				description: `Tool: ${output.toolName}`,
+				metadata: {
+					tool: output.toolName,
+					...(output.toolInput
+						? { input_keys: Object.keys(output.toolInput) }
+						: {}),
+				},
+			});
+		}
+	}
+
 	// Route text chunks through the streaming path; everything else uses plain send.
 	if (output.type === "text" && output.result) {
 		log.info(
@@ -481,9 +517,22 @@ async function startContainer(
 				log.error({ chatId, error: finalOutput.error }, "Container error");
 			}
 
-			commitWorkspace(chatId, { containerName, caller, prompt }).catch(
-				() => {},
-			);
+			// Audit: log session end
+			const endSessionId =
+				finalOutput.newSessionId ?? readSessions()[chatId]?.sessionId;
+			if (endSessionId) {
+				audit.sessionEnd({
+					sessionId: endSessionId,
+					endReason: finalOutput.status === "error" ? "error" : "completed",
+				});
+			}
+
+			commitWorkspace(chatId, {
+				containerName,
+				caller,
+				prompt,
+				sessionId: endSessionId,
+			}).catch(() => {});
 		})
 		.catch((err) => {
 			log.error({ chatId, err }, "Container result promise rejected");
@@ -731,7 +780,35 @@ async function spawnEphemeral(
 			effort: task.effort,
 		},
 		async (output) => {
-			if (output.newSessionId) sessionId = output.newSessionId;
+			if (output.newSessionId) {
+				sessionId = output.newSessionId;
+				// Audit: log session start for scheduled task
+				if (!auditedSessions.has(output.newSessionId)) {
+					auditedSessions.add(output.newSessionId);
+					audit.sessionStart({
+						sessionId: output.newSessionId,
+						chatId,
+						sessionType: "cron",
+						source: "scheduler",
+					});
+				}
+			}
+			if (output.type === "tool_use" && output.toolName) {
+				const sid = sessionId ?? output.newSessionId;
+				if (sid) {
+					audit.event({
+						sessionId: sid,
+						eventType: "tool.use",
+						description: `Tool: ${output.toolName}`,
+						metadata: {
+							tool: output.toolName,
+							...(output.toolInput
+								? { input_keys: Object.keys(output.toolInput) }
+								: {}),
+						},
+					});
+				}
+			}
 			if (output.type === "result") {
 				// Query complete — signal container to exit gracefully so
 				// Claude Code SessionEnd hooks (e.g. session summaries) run.
@@ -741,6 +818,16 @@ async function spawnEphemeral(
 	);
 
 	const output = await result;
+
+	// Audit: log session end for scheduled task
+	const epSid = output.newSessionId ?? sessionId;
+	if (epSid) {
+		audit.sessionEnd({
+			sessionId: epSid,
+			endReason: output.status === "error" ? "error" : "completed",
+		});
+	}
+
 	await commitWorkspace(chatId, {
 		caller,
 		prompt,

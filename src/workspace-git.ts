@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import pino from "pino";
 
+import { audit } from "./audit-client.ts";
 import { WORKSPACES_DIR } from "./config.ts";
 
 const log = pino({
@@ -14,6 +15,7 @@ export interface CommitMeta {
 	containerName?: string | undefined;
 	caller?: { name: string; source: string } | undefined;
 	prompt?: string | undefined;
+	sessionId?: string | undefined;
 }
 
 function gitDir(chatId: string): string {
@@ -127,6 +129,19 @@ export async function commitWorkspace(
 
 		await gitAsync(chatId, ["commit", "-m", lines.join("\n")]);
 		log.info({ chatId }, "Workspace committed");
+
+		// Audit: log git commit
+		if (meta?.sessionId) {
+			audit.event({
+				sessionId: meta.sessionId,
+				eventType: "git.commit",
+				description: "Workspace auto-committed after session",
+				metadata: {
+					chatId,
+					caller: meta.caller?.name ?? null,
+				},
+			});
+		}
 	} catch (err) {
 		log.warn({ chatId, err }, "Failed to commit workspace");
 	}
