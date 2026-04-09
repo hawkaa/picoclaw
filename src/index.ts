@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import pino from "pino";
+import { issueAAT } from "./agentlair-aat.ts";
 import { audit } from "./audit-client.ts";
 import {
 	DATA_DIR,
@@ -371,6 +372,7 @@ async function handleOutput(
 			model: session2?.model ?? botCfg?.defaultModel,
 			sessionType: "interactive",
 			source: "telegram",
+			botApiKey: botCfg?.agentlairApiKey,
 		});
 	}
 
@@ -379,6 +381,7 @@ async function handleOutput(
 		const cstate = containers.get(chatId);
 		const sid = cstate?.sessionId ?? output.newSessionId;
 		if (sid) {
+			const botCfg2 = botConfigForChat(chatId);
 			audit.event({
 				sessionId: sid,
 				eventType: "tool.use",
@@ -389,6 +392,7 @@ async function handleOutput(
 						? { input_keys: Object.keys(output.toolInput) }
 						: {}),
 				},
+				botApiKey: botCfg2?.agentlairApiKey,
 			});
 		}
 	}
@@ -459,11 +463,22 @@ async function startContainer(
 	const effort = session?.effort;
 	const anthropicApiKey = botConfig?.anthropicApiKey;
 
+	// Issue AgentLair AAT for this session (non-blocking on failure)
+	let agentlairAAT: string | undefined;
+	if (botConfig?.agentlairApiKey) {
+		agentlairAAT = await issueAAT({
+			apiKey: botConfig.agentlairApiKey,
+			sessionId: sessionId ?? "new",
+			chatId,
+			botName: botConfig.name,
+		});
+	}
+
 	await dispatchChatAction(chatId);
 
 	const { proc, containerName, result } = await spawnContainer(
 		chatId,
-		{ prompt, sessionId, chatId, caller, model, anthropicApiKey, images, effort },
+		{ prompt, sessionId, chatId, caller, model, anthropicApiKey, images, effort, agentlairAAT },
 		async (output) => {
 			// Drop output (including session writes) from containers that were
 			// superseded by a /new reset after this container was spawned.
@@ -520,10 +535,12 @@ async function startContainer(
 			// Audit: log session end
 			const endSessionId =
 				finalOutput.newSessionId ?? readSessions()[chatId]?.sessionId;
+			const endBotCfg = botConfigForChat(chatId);
 			if (endSessionId) {
 				audit.sessionEnd({
 					sessionId: endSessionId,
 					endReason: finalOutput.status === "error" ? "error" : "completed",
+					botApiKey: endBotCfg?.agentlairApiKey,
 				});
 			}
 
@@ -532,6 +549,7 @@ async function startContainer(
 				caller,
 				prompt,
 				sessionId: endSessionId,
+				botApiKey: endBotCfg?.agentlairApiKey,
 			}).catch(() => {});
 		})
 		.catch((err) => {
@@ -761,7 +779,20 @@ async function spawnEphemeral(
 		source: "scheduler" as const,
 	};
 
-	const anthropicApiKey = botConfigForChat(chatId)?.anthropicApiKey;
+	const ephBotCfg = botConfigForChat(chatId);
+	const anthropicApiKey = ephBotCfg?.anthropicApiKey;
+	const ephBotApiKey = ephBotCfg?.agentlairApiKey;
+
+	// Issue AgentLair AAT for scheduled task (non-blocking on failure)
+	let ephAAT: string | undefined;
+	if (ephBotApiKey) {
+		ephAAT = await issueAAT({
+			apiKey: ephBotApiKey,
+			sessionId: "cron",
+			chatId,
+			botName: ephBotCfg?.name ?? "unknown",
+		});
+	}
 
 	// We use an onOutput callback so we can detect when the query
 	// completes and signal the container to exit gracefully — this
@@ -777,6 +808,7 @@ async function spawnEphemeral(
 			caller,
 			model: task.model,
 			anthropicApiKey,
+			agentlairAAT: ephAAT,
 			effort: task.effort,
 		},
 		async (output) => {
@@ -790,6 +822,7 @@ async function spawnEphemeral(
 						chatId,
 						sessionType: "cron",
 						source: "scheduler",
+						botApiKey: ephBotApiKey,
 					});
 				}
 			}
@@ -806,6 +839,7 @@ async function spawnEphemeral(
 								? { input_keys: Object.keys(output.toolInput) }
 								: {}),
 						},
+						botApiKey: ephBotApiKey,
 					});
 				}
 			}
@@ -825,6 +859,7 @@ async function spawnEphemeral(
 		audit.sessionEnd({
 			sessionId: epSid,
 			endReason: output.status === "error" ? "error" : "completed",
+			botApiKey: ephBotApiKey,
 		});
 	}
 
@@ -907,6 +942,11 @@ async function main(): Promise<void> {
 		spawnEphemeral,
 		sendMessage: dispatchMessage,
 	});
+
+	// Register bots with audit client (logs which key each bot uses)
+	for (const cfg of botConfigs) {
+		audit.registerBot(cfg.name, cfg.agentlairApiKey);
+	}
 
 	// Start parallel polling loops (one per bot)
 	const pollers = clients.map((client) => pollBot(client));

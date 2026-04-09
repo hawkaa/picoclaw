@@ -16,6 +16,7 @@ export interface CommitMeta {
 	caller?: { name: string; source: string } | undefined;
 	prompt?: string | undefined;
 	sessionId?: string | undefined;
+	botApiKey?: string | undefined;
 }
 
 function gitDir(chatId: string): string {
@@ -140,6 +141,7 @@ export async function commitWorkspace(
 					chatId,
 					caller: meta.caller?.name ?? null,
 				},
+				botApiKey: meta.botApiKey,
 			});
 		}
 	} catch (err) {

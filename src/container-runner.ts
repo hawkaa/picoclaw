@@ -291,6 +291,11 @@ export async function spawnContainer(
 	// Pass secrets via stdin
 	input.secrets = readSecrets(input.anthropicApiKey!, input.model);
 	input.anthropicApiKey = undefined;
+	// Inject AgentLair AAT if issued by the host
+	if (input.agentlairAAT) {
+		input.secrets["AGENTLAIR_AAT"] = input.agentlairAAT;
+		input.agentlairAAT = undefined;
+	}
 	proc.stdin?.write(JSON.stringify(input));
 	proc.stdin?.end();
 	input.secrets = undefined;
