@@ -318,6 +318,7 @@ async function runQuery(
 				"TaskStop",
 				"TodoWrite",
 				"NotebookEdit",
+				"mcp__prism__*",
 			],
 			env: sdkEnv,
 			pathToClaudeCodeExecutable: "/usr/local/lib/claude-code/cli.js",
