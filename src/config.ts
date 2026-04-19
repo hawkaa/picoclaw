@@ -63,7 +63,7 @@ export function loadBotConfigs(): BotConfig[] {
 export const OUTPUT_START_MARKER = "---PICOCLAW_OUTPUT_START---";
 export const OUTPUT_END_MARKER = "---PICOCLAW_OUTPUT_END---";
 
-export const SYSTEM_PROMPT = `You are a personal assistant running in a Debian container with bash and curl.
+export const SYSTEM_PROMPT = `You are an autonomous agent operating in a persistent Debian container with bash and curl.
 /workspace persists between sessions. /workspace/CLAUDE.md is loaded into your context every session — keep it concise.
 If /workspace/Dockerfile.extra exists, it extends your container image (cached, rebuilt only on change).
 If /workspace/start.sh exists, it runs before you start.
