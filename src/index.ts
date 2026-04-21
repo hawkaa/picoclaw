@@ -25,6 +25,11 @@ import {
 import { startIpcWatcher } from "./ipc.ts";
 import { startTaskScheduler } from "./task-scheduler.ts";
 import { TelegramClient, type TelegramUpdate } from "./telegram.ts";
+import {
+	trustReportSessionEnd,
+	trustReportSessionStart,
+	trustReportToolUse,
+} from "./trust-events-client.ts";
 import type {
 	BotConfig,
 	ContainerOutput,
@@ -374,6 +379,13 @@ async function handleOutput(
 			source: "telegram",
 			botApiKey: botCfg?.agentlairApiKey,
 		});
+		// Trust engine: report session start behavioral event
+		trustReportSessionStart({
+			botApiKey: botCfg?.agentlairApiKey,
+			sessionId: output.newSessionId,
+			sessionType: "interactive",
+			source: "telegram",
+		});
 	}
 
 	// Audit: log tool use events
@@ -393,6 +405,12 @@ async function handleOutput(
 						: {}),
 				},
 				botApiKey: botCfg2?.agentlairApiKey,
+			});
+			// Trust engine: report tool use behavioral event
+			trustReportToolUse({
+				botApiKey: botCfg2?.agentlairApiKey,
+				sessionId: sid,
+				toolName: output.toolName,
 			});
 		}
 	}
@@ -478,7 +496,17 @@ async function startContainer(
 
 	const { proc, containerName, result } = await spawnContainer(
 		chatId,
-		{ prompt, sessionId, chatId, caller, model, anthropicApiKey, images, effort, agentlairAAT },
+		{
+			prompt,
+			sessionId,
+			chatId,
+			caller,
+			model,
+			anthropicApiKey,
+			images,
+			effort,
+			agentlairAAT,
+		},
 		async (output) => {
 			// Drop output (including session writes) from containers that were
 			// superseded by a /new reset after this container was spawned.
@@ -541,6 +569,12 @@ async function startContainer(
 					sessionId: endSessionId,
 					endReason: finalOutput.status === "error" ? "error" : "completed",
 					botApiKey: endBotCfg?.agentlairApiKey,
+				});
+				// Trust engine: report session end behavioral event
+				trustReportSessionEnd({
+					botApiKey: endBotCfg?.agentlairApiKey,
+					sessionId: endSessionId,
+					endReason: finalOutput.status === "error" ? "error" : "completed",
 				});
 			}
 
@@ -761,7 +795,12 @@ async function handleMessage(
 async function spawnEphemeral(
 	chatId: string,
 	prompt: string,
-	task: { id: string; label?: string | undefined; model?: string | undefined; effort?: EffortLevel | undefined },
+	task: {
+		id: string;
+		label?: string | undefined;
+		model?: string | undefined;
+		effort?: EffortLevel | undefined;
+	},
 ): Promise<ContainerOutput> {
 	seedWorkspace(chatId);
 	ensureWorkspaceGit(chatId);
@@ -824,6 +863,13 @@ async function spawnEphemeral(
 						source: "scheduler",
 						botApiKey: ephBotApiKey,
 					});
+					// Trust engine: report session start behavioral event
+					trustReportSessionStart({
+						botApiKey: ephBotApiKey,
+						sessionId: output.newSessionId,
+						sessionType: "cron",
+						source: "scheduler",
+					});
 				}
 			}
 			if (output.type === "tool_use" && output.toolName) {
@@ -840,6 +886,12 @@ async function spawnEphemeral(
 								: {}),
 						},
 						botApiKey: ephBotApiKey,
+					});
+					// Trust engine: report tool use behavioral event
+					trustReportToolUse({
+						botApiKey: ephBotApiKey,
+						sessionId: sid,
+						toolName: output.toolName,
 					});
 				}
 			}
@@ -860,6 +912,12 @@ async function spawnEphemeral(
 			sessionId: epSid,
 			endReason: output.status === "error" ? "error" : "completed",
 			botApiKey: ephBotApiKey,
+		});
+		// Trust engine: report session end behavioral event
+		trustReportSessionEnd({
+			botApiKey: ephBotApiKey,
+			sessionId: epSid,
+			endReason: output.status === "error" ? "error" : "completed",
 		});
 	}
 

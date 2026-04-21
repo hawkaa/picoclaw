@@ -29,7 +29,12 @@ export function resolveModelId(alias: string): string {
 	return MODEL_ALIASES[alias.toLowerCase()] ?? alias;
 }
 
-const VALID_EFFORT_LEVELS = new Set<EffortLevel>(["low", "medium", "high", "max"]);
+const VALID_EFFORT_LEVELS = new Set<EffortLevel>([
+	"low",
+	"medium",
+	"high",
+	"max",
+]);
 
 export function parseEffortLevel(value: string): EffortLevel | null {
 	const lower = value.toLowerCase() as EffortLevel;
