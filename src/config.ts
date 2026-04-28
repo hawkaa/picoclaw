@@ -21,6 +21,7 @@ export const TELEGRAM_POLL_TIMEOUT = 30; // seconds
 
 export const MODEL_ALIASES: Record<string, string> = {
 	opus: "claude-opus-4-6",
+	"opus-4.7": "claude-opus-4-7",
 	sonnet: "claude-sonnet-4-6",
 	haiku: "claude-haiku-4-5-20251001",
 };
@@ -29,7 +30,13 @@ export function resolveModelId(alias: string): string {
 	return MODEL_ALIASES[alias.toLowerCase()] ?? alias;
 }
 
-const VALID_EFFORT_LEVELS = new Set<EffortLevel>(["low", "medium", "high", "max"]);
+const VALID_EFFORT_LEVELS = new Set<EffortLevel>([
+	"low",
+	"medium",
+	"high",
+	"max",
+	"xhigh",
+]);
 
 export function parseEffortLevel(value: string): EffortLevel | null {
 	const lower = value.toLowerCase() as EffortLevel;

@@ -3,6 +3,7 @@ export interface BotConfig {
 	botToken: string;
 	allowedUserId: string;
 	defaultModel?: string | undefined;
+	defaultEffort?: EffortLevel | undefined;
 	anthropicApiKey: string;
 	agentlairApiKey?: string | undefined;
 }
@@ -14,7 +15,7 @@ export interface ImageAttachment {
 	mediaType: string;
 }
 
-export type EffortLevel = "low" | "medium" | "high" | "max";
+export type EffortLevel = "low" | "medium" | "high" | "max" | "xhigh";
 
 export interface ContainerInput {
 	prompt: string;
