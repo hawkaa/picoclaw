@@ -20,7 +20,7 @@ interface ImageAttachment {
 	mediaType: string;
 }
 
-type EffortLevel = "low" | "medium" | "high" | "max";
+type EffortLevel = "low" | "medium" | "high" | "max" | "xhigh";
 
 interface ContainerInput {
 	prompt: string;

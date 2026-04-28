@@ -353,6 +353,7 @@ async function handleOutput(
 			sessionId: output.newSessionId,
 			lastActivity: new Date().toISOString(),
 			model: existing?.model,
+			effort: existing?.effort,
 		};
 		writeSessions(sessions);
 
@@ -460,7 +461,7 @@ async function startContainer(
 	const sessionId = session?.sessionId || undefined;
 	const botConfig = botConfigForChat(chatId);
 	const model = session?.model ?? botConfig?.defaultModel;
-	const effort = session?.effort;
+	const effort = session?.effort ?? botConfig?.defaultEffort;
 	const anthropicApiKey = botConfig?.anthropicApiKey;
 
 	// Issue AgentLair AAT for this session (non-blocking on failure)
@@ -478,7 +479,17 @@ async function startContainer(
 
 	const { proc, containerName, result } = await spawnContainer(
 		chatId,
-		{ prompt, sessionId, chatId, caller, model, anthropicApiKey, images, effort, agentlairAAT },
+		{
+			prompt,
+			sessionId,
+			chatId,
+			caller,
+			model,
+			anthropicApiKey,
+			images,
+			effort,
+			agentlairAAT,
+		},
 		async (output) => {
 			// Drop output (including session writes) from containers that were
 			// superseded by a /new reset after this container was spawned.
@@ -524,6 +535,7 @@ async function startContainer(
 					sessionId: finalOutput.newSessionId,
 					lastActivity: new Date().toISOString(),
 					model: existing?.model,
+					effort: existing?.effort,
 				};
 				writeSessions(sessions);
 			}
@@ -647,24 +659,36 @@ async function handleMessage(
 		}
 	}
 
-	// /new command: reset session (optionally with model)
+	// /new command: reset session (optionally with model and/or effort)
+	// Supports: /new, /new opus, /new opus high, /new high (effort only)
 	if (text === "/new" || text.startsWith("/new ")) {
-		const modelArg = text.slice("/new".length).trim();
+		const args = text.slice("/new".length).trim().split(/\s+/).filter(Boolean);
 
-		// Validate model argument if provided
 		let model: string | undefined;
-		if (modelArg) {
-			// Check if it's a known alias or looks like a model ID (contains hyphen)
-			const resolved = resolveModelId(modelArg);
-			if (resolved === modelArg && !modelArg.includes("-")) {
+		let effort: EffortLevel | undefined;
+
+		for (const arg of args) {
+			// Try as effort level first
+			const parsedEffort = parseEffortLevel(arg);
+			if (parsedEffort) {
+				effort = parsedEffort;
+				continue;
+			}
+			// Try as model alias or ID
+			if (!model) {
+				const resolved = resolveModelId(arg);
+				if (resolved !== arg || arg.includes("-")) {
+					model = resolved;
+					continue;
+				}
 				const aliases = Object.keys(MODEL_ALIASES).join(", ");
+				const efforts = "low, medium, high, max, xhigh";
 				await client.sendMessage(
 					chatId,
-					`Unknown model "${modelArg}". Valid aliases: ${aliases}`,
+					`Unknown argument "${arg}". Model aliases: ${aliases}. Effort levels: ${efforts}`,
 				);
 				return;
 			}
-			model = resolved;
 		}
 
 		const state = containers.get(chatId);
@@ -682,11 +706,12 @@ async function handleMessage(
 		sessionResets.set(chatId, Date.now());
 		// Clear session ID and wipe Claude session files
 		const sessions = readSessions();
-		if (model) {
+		if (model || effort) {
 			sessions[chatId] = {
 				sessionId: "",
 				lastActivity: new Date().toISOString(),
 				model,
+				effort,
 			};
 		} else {
 			delete sessions[chatId];
@@ -697,10 +722,10 @@ async function handleMessage(
 			model ??
 			botConfigForChat(chatId)?.defaultModel ??
 			process.env["ANTHROPIC_MODEL"];
-		const reply = effectiveModel
-			? `Session reset. Model: ${effectiveModel}`
-			: "Session reset.";
-		await client.sendMessage(chatId, reply);
+		const parts: string[] = ["Session reset."];
+		if (effectiveModel) parts.push(`Model: ${effectiveModel}`);
+		if (effort) parts.push(`Effort: ${effort}`);
+		await client.sendMessage(chatId, parts.join(" "));
 		return;
 	}
 
@@ -713,7 +738,7 @@ async function handleMessage(
 			const current = sessions[chatId]?.effort ?? "high (default)";
 			await client.sendMessage(
 				chatId,
-				`Current effort: ${current}\nUsage: /effort low|medium|high|max`,
+				`Current effort: ${current}\nUsage: /effort low|medium|high|max|xhigh`,
 			);
 			return;
 		}
@@ -722,7 +747,7 @@ async function handleMessage(
 		if (!effort) {
 			await client.sendMessage(
 				chatId,
-				`Unknown effort level "${arg}". Valid: low, medium, high, max`,
+				`Unknown effort level "${arg}". Valid: low, medium, high, max, xhigh`,
 			);
 			return;
 		}
@@ -761,7 +786,12 @@ async function handleMessage(
 async function spawnEphemeral(
 	chatId: string,
 	prompt: string,
-	task: { id: string; label?: string | undefined; model?: string | undefined; effort?: EffortLevel | undefined },
+	task: {
+		id: string;
+		label?: string | undefined;
+		model?: string | undefined;
+		effort?: EffortLevel | undefined;
+	},
 ): Promise<ContainerOutput> {
 	seedWorkspace(chatId);
 	ensureWorkspaceGit(chatId);
@@ -809,7 +839,7 @@ async function spawnEphemeral(
 			model: task.model,
 			anthropicApiKey,
 			agentlairAAT: ephAAT,
-			effort: task.effort,
+			effort: task.effort ?? ephBotCfg?.defaultEffort,
 		},
 		async (output) => {
 			if (output.newSessionId) {
