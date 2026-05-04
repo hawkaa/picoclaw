@@ -320,7 +320,9 @@ async function runQuery(
 				"NotebookEdit",
 			],
 			env: sdkEnv,
-			pathToClaudeCodeExecutable: "/usr/local/lib/claude-code/cli.js",
+			// CLI 2.1.126+ ships as a native binary; the SDK exec's any path not
+			// ending in .js/.mjs/.ts/.tsx/.jsx directly, so no node/bun wrapper.
+			pathToClaudeCodeExecutable: "/usr/local/bin/claude",
 			permissionMode: "bypassPermissions",
 			allowDangerouslySkipPermissions: true,
 			settingSources: ["project", "user"],
