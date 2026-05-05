@@ -318,6 +318,7 @@ async function runQuery(
 				"TaskStop",
 				"TodoWrite",
 				"NotebookEdit",
+				"mcp__prism__*",
 			],
 			env: sdkEnv,
 			// CLI 2.1.126+ ships as a native binary; the SDK exec's any path not
