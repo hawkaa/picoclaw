@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import pino from "pino";
 import { issueAAT } from "./agentlair-aat.ts";
+import { defaultPrincipalDid, enrollPoPA } from "./agentlair-popa.ts";
 import { audit } from "./audit-client.ts";
 import {
 	DATA_DIR,
@@ -66,6 +67,34 @@ function botConfigForChat(chatId: string): BotConfig | undefined {
 	const client = clientsByChatId.get(chatId);
 	if (!client) return undefined;
 	return configsByUserId.get(client.allowedUserId);
+}
+
+/**
+ * AgentLair sub-feature toggles. Each defaults ON when `agentlairApiKey` is
+ * set and is independently disableable. Backward-compat: a bot configured
+ * with only `agentlairApiKey` gets AAT + audit + PoPA, just like before
+ * these flags existed.
+ */
+function aatEnabled(cfg: BotConfig | undefined): boolean {
+	if (!cfg?.agentlairApiKey) return false;
+	return cfg.agentlairAAT !== false;
+}
+function auditEnabled(cfg: BotConfig | undefined): boolean {
+	if (!cfg?.agentlairApiKey) return false;
+	return cfg.agentlairAudit !== false;
+}
+function popaEnabledFor(cfg: BotConfig): boolean {
+	if (!cfg.agentlairApiKey) return false;
+	return cfg.agentlairPoPA !== false;
+}
+
+/**
+ * Audit key gating. Returns the AgentLair API key only when audit is
+ * actively enabled for this bot; otherwise `undefined`, which routes
+ * through the audit client's silent fallback.
+ */
+function auditKey(cfg: BotConfig | undefined): string | undefined {
+	return auditEnabled(cfg) ? cfg?.agentlairApiKey : undefined;
 }
 
 /** Dispatcher: route sendMessage to the correct bot by chatId */
@@ -373,7 +402,7 @@ async function handleOutput(
 			model: session2?.model ?? botCfg?.defaultModel,
 			sessionType: "interactive",
 			source: "telegram",
-			botApiKey: botCfg?.agentlairApiKey,
+			botApiKey: auditKey(botCfg),
 		});
 	}
 
@@ -393,7 +422,7 @@ async function handleOutput(
 						? { input_keys: Object.keys(output.toolInput) }
 						: {}),
 				},
-				botApiKey: botCfg2?.agentlairApiKey,
+				botApiKey: auditKey(botCfg2),
 			});
 		}
 	}
@@ -466,7 +495,7 @@ async function startContainer(
 
 	// Issue AgentLair AAT for this session (non-blocking on failure)
 	let agentlairAAT: string | undefined;
-	if (botConfig?.agentlairApiKey) {
+	if (aatEnabled(botConfig) && botConfig?.agentlairApiKey) {
 		agentlairAAT = await issueAAT({
 			apiKey: botConfig.agentlairApiKey,
 			sessionId: sessionId ?? "new",
@@ -552,7 +581,7 @@ async function startContainer(
 				audit.sessionEnd({
 					sessionId: endSessionId,
 					endReason: finalOutput.status === "error" ? "error" : "completed",
-					botApiKey: endBotCfg?.agentlairApiKey,
+					botApiKey: auditKey(endBotCfg),
 				});
 			}
 
@@ -561,7 +590,7 @@ async function startContainer(
 				caller,
 				prompt,
 				sessionId: endSessionId,
-				botApiKey: endBotCfg?.agentlairApiKey,
+				botApiKey: auditKey(endBotCfg),
 			}).catch(() => {});
 		})
 		.catch((err) => {
@@ -811,16 +840,16 @@ async function spawnEphemeral(
 
 	const ephBotCfg = botConfigForChat(chatId);
 	const anthropicApiKey = ephBotCfg?.anthropicApiKey;
-	const ephBotApiKey = ephBotCfg?.agentlairApiKey;
+	const ephAuditKey = auditKey(ephBotCfg);
 
 	// Issue AgentLair AAT for scheduled task (non-blocking on failure)
 	let ephAAT: string | undefined;
-	if (ephBotApiKey) {
+	if (aatEnabled(ephBotCfg) && ephBotCfg?.agentlairApiKey) {
 		ephAAT = await issueAAT({
-			apiKey: ephBotApiKey,
+			apiKey: ephBotCfg.agentlairApiKey,
 			sessionId: "cron",
 			chatId,
-			botName: ephBotCfg?.name ?? "unknown",
+			botName: ephBotCfg.name,
 		});
 	}
 
@@ -852,7 +881,7 @@ async function spawnEphemeral(
 						chatId,
 						sessionType: "cron",
 						source: "scheduler",
-						botApiKey: ephBotApiKey,
+						botApiKey: ephAuditKey,
 					});
 				}
 			}
@@ -869,7 +898,7 @@ async function spawnEphemeral(
 								? { input_keys: Object.keys(output.toolInput) }
 								: {}),
 						},
-						botApiKey: ephBotApiKey,
+						botApiKey: ephAuditKey,
 					});
 				}
 			}
@@ -889,7 +918,7 @@ async function spawnEphemeral(
 		audit.sessionEnd({
 			sessionId: epSid,
 			endReason: output.status === "error" ? "error" : "completed",
-			botApiKey: ephBotApiKey,
+			botApiKey: ephAuditKey,
 		});
 	}
 
@@ -976,6 +1005,25 @@ async function main(): Promise<void> {
 	// Register bots with audit client (logs which key each bot uses)
 	for (const cfg of botConfigs) {
 		audit.registerBot(cfg.name, cfg.agentlairApiKey);
+	}
+
+	// PoPA enrollment per bot (idempotent, non-blocking).
+	// Each bot with an AgentLair key gets its principal DID enrolled so it
+	// accumulates an individual continuity streak. Failures are logged and
+	// ignored — host startup must not depend on AgentLair availability.
+	for (const cfg of botConfigs) {
+		if (!popaEnabledFor(cfg)) continue;
+		if (!cfg.agentlairApiKey) continue;
+		const principal = cfg.agentlairPrincipal ?? defaultPrincipalDid(cfg.name);
+		// Fire and forget; awaiting would couple startup latency to AgentLair.
+		enrollPoPA({
+			apiKey: cfg.agentlairApiKey,
+			principal,
+			botName: cfg.name,
+		}).catch(() => {
+			// Already logged inside enrollPoPA; swallow here so the loop
+			// continues for other bots.
+		});
 	}
 
 	// Start parallel polling loops (one per bot)
