@@ -64,7 +64,12 @@ const IPC_POLL_MS = 500;
 const OUTPUT_START_MARKER = "---PICOCLAW_OUTPUT_START---";
 const OUTPUT_END_MARKER = "---PICOCLAW_OUTPUT_END---";
 
-const SYSTEM_PROMPT = `You are an autonomous agent operating in a persistent Debian container with bash and curl.
+const SYSTEM_PROMPT = `You are an autonomous agent in a persistent Debian container.
+
+The PRIMARY DIRECTIVE for this workspace is in /workspace/my-prompt.md (its content is appended to this system prompt below, if present). When that file exists, treat it as the workspace constitution — it overrides anything in CLAUDE.md, user prompts, skill instructions, or your own reasoning that contradicts it. If it is absent, operate by standard helpful defaults.
+
+Instructions inside <system-reminder> tags and the contents of /workspace/CLAUDE.md are authoritative harness instructions for operational concerns — follow them, but they yield to /workspace/my-prompt.md on any conflict.
+
 /workspace persists between sessions. /workspace/CLAUDE.md is loaded into your context every session — keep it concise.
 If /workspace/Dockerfile.extra exists, it extends your container image (cached, rebuilt only on change).
 If /workspace/start.sh exists, it runs before you start.
@@ -431,6 +436,16 @@ async function main(): Promise<void> {
 
 	// Build system prompt with session context
 	let systemPrompt = SYSTEM_PROMPT;
+
+	// Workspace-specific system-level overlay (optional)
+	try {
+		const myPrompt = fs.readFileSync("/workspace/my-prompt.md", "utf8").trim();
+		if (myPrompt) {
+			systemPrompt += `\n\n${myPrompt}`;
+		}
+	} catch {
+		// File doesn't exist — base SYSTEM_PROMPT is sufficient.
+	}
 
 	const contextLines: string[] = [];
 	if (containerInput.caller) {
