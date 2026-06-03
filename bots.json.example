@@ -1,0 +1,33 @@
+[
+  {
+    "//": "Minimal bot — no AgentLair integration. Self-hosted, no external identity.",
+    "name": "minimal",
+    "botToken": "REPLACE_WITH_TELEGRAM_BOT_TOKEN",
+    "allowedUserId": "REPLACE_WITH_TELEGRAM_USER_ID",
+    "anthropicApiKey": "sk-ant-REPLACE",
+    "defaultModel": "sonnet",
+    "defaultEffort": "high"
+  },
+  {
+    "//": "Fully-loaded bot with signed agent identity via AgentLair.",
+    "//1": "Setting agentlairApiKey alone enables AAT + audit + PoPA by default.",
+    "//2": "Get a key at https://agentlair.dev (free tier available).",
+    "name": "pico",
+    "botToken": "REPLACE_WITH_TELEGRAM_BOT_TOKEN",
+    "allowedUserId": "REPLACE_WITH_TELEGRAM_USER_ID",
+    "anthropicApiKey": "sk-ant-REPLACE",
+    "defaultModel": "opus",
+    "defaultEffort": "max",
+    "agentlairApiKey": "al_live_REPLACE",
+
+    "//3": "Optional sub-toggles. Each defaults to true when agentlairApiKey is set.",
+    "//4": "Set any to false to disable that capability while keeping the others.",
+    "agentlairAAT": true,
+    "agentlairAudit": true,
+    "agentlairPoPA": true,
+
+    "//5": "Optional principal DID for this bot. Auto-derived as",
+    "//6": "did:web:agentlair.dev:picoclaw:<botName> if omitted.",
+    "agentlairPrincipal": "did:web:agentlair.dev:picoclaw:pico"
+  }
+]

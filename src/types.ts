@@ -5,7 +5,36 @@ export interface BotConfig {
 	defaultModel?: string | undefined;
 	defaultEffort?: EffortLevel | undefined;
 	anthropicApiKey: string;
+	/**
+	 * AgentLair API key. When set, the bot opts into signed identity, audit
+	 * telemetry, and PoPA continuity attestation. Omit to run PicoClaw
+	 * without external identity (default for self-hosted setups).
+	 */
 	agentlairApiKey?: string | undefined;
+	/**
+	 * Per-bot toggle for AAT (Agent Auth Token) issuance. Defaults to `true`
+	 * when `agentlairApiKey` is set. Set to `false` to keep audit/PoPA but
+	 * skip per-session JWT issuance.
+	 */
+	agentlairAAT?: boolean | undefined;
+	/**
+	 * Per-bot toggle for audit telemetry forwarding. Defaults to `true` when
+	 * `agentlairApiKey` is set. Set to `false` to disable audit while keeping
+	 * AAT/PoPA.
+	 */
+	agentlairAudit?: boolean | undefined;
+	/**
+	 * Per-bot toggle for PoPA enrollment. Defaults to `true` when
+	 * `agentlairApiKey` is set. Set to `false` to skip enrollment for this
+	 * bot (no continuity streak will accumulate).
+	 */
+	agentlairPoPA?: boolean | undefined;
+	/**
+	 * Principal DID for this bot. Auto-derived as
+	 * `did:web:agentlair.dev:picoclaw:<botName>` if omitted. Override to
+	 * point this bot at an existing DID document.
+	 */
+	agentlairPrincipal?: string | undefined;
 }
 
 export interface ImageAttachment {
