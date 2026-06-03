@@ -267,6 +267,8 @@ export async function spawnContainer(
 		"--rm",
 		"--name",
 		containerName,
+		"--security-opt",
+		`seccomp=${path.join(CONTAINER_DIR, "seccomp-picoclaw.json")}`,
 		"-v",
 		`${path.join(base, "workspace")}:/workspace`,
 		"-v",
