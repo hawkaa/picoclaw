@@ -17,6 +17,21 @@ export interface ImageAttachment {
 
 export type EffortLevel = "low" | "medium" | "high" | "max" | "xhigh";
 
+export interface SessionProfile {
+	/** Surfaced to in-container hooks/gates/scripts as PICOCLAW_PERSONA (e.g. "operator", "evaluator", "sandbox"). */
+	persona?: string | undefined;
+	/** Workspace-relative path to the system-prompt overlay appended to the base SYSTEM_PROMPT.
+	 *  Omitted → "my-prompt.md". Empty string → no overlay (boot without the operator constitution). */
+	systemPromptOverlay?: string | undefined;
+	/** SDK settingSources. Omitted → ["project", "user"]. Use ["user"] to suppress project CLAUDE.md + project hooks. */
+	settingSources?: string[] | undefined;
+	/** Env merged into the in-container SDK env AFTER process.env + secrets, so it overrides them. Used to set
+	 *  PICOCLAW_PERSONA and to redirect the experiential store (e.g. TURSO_URL/TURSO_AUTH_TOKEN to a blank/clone namespace). */
+	extraEnv?: Record<string, string> | undefined;
+	/** When true, start a fresh SDK session — ignore any prior sessionId (no resume). */
+	freshSession?: boolean | undefined;
+}
+
 export interface ContainerInput {
 	prompt: string;
 	sessionId?: string | undefined;
@@ -29,6 +44,7 @@ export interface ContainerInput {
 	agentlairAAT?: string | undefined;
 	images?: ImageAttachment[] | undefined;
 	effort?: EffortLevel | undefined;
+	profile?: SessionProfile | undefined;
 }
 
 export interface ContainerOutput {
@@ -61,6 +77,7 @@ export interface ScheduledTask {
 	created_at: string;
 	model?: string | undefined;
 	effort?: EffortLevel | undefined;
+	profile?: SessionProfile | undefined;
 }
 
 export interface SessionData {

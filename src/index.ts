@@ -33,6 +33,7 @@ import type {
 	ImageAttachment,
 	ScheduledTask,
 	SessionData,
+	SessionProfile,
 } from "./types.ts";
 import { commitWorkspace, ensureWorkspaceGit } from "./workspace-git.ts";
 
@@ -438,6 +439,7 @@ async function startContainer(
 	prompt: string,
 	caller?: { name: string; source: "telegram" | "scheduler" } | undefined,
 	images?: ImageAttachment[] | undefined,
+	profile?: SessionProfile | undefined,
 ): Promise<void> {
 	// Capture spawn time before any async work. Used to detect if /new was called
 	// while this container was running (sessionResets[chatId] > spawnTime).
@@ -489,6 +491,7 @@ async function startContainer(
 			images,
 			effort,
 			agentlairAAT,
+			profile,
 		},
 		async (output) => {
 			// Drop output (including session writes) from containers that were
@@ -791,6 +794,7 @@ async function spawnEphemeral(
 		label?: string | undefined;
 		model?: string | undefined;
 		effort?: EffortLevel | undefined;
+		profile?: SessionProfile | undefined;
 	},
 ): Promise<ContainerOutput> {
 	seedWorkspace(chatId);
@@ -840,6 +844,7 @@ async function spawnEphemeral(
 			anthropicApiKey,
 			agentlairAAT: ephAAT,
 			effort: task.effort ?? ephBotCfg?.defaultEffort,
+			profile: task.profile,
 		},
 		async (output) => {
 			if (output.newSessionId) {

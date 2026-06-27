@@ -2,7 +2,12 @@ import { CronExpressionParser } from "cron-parser";
 import pino from "pino";
 
 import { TASK_CHECK_INTERVAL } from "./config.ts";
-import type { ContainerOutput, EffortLevel, ScheduledTask } from "./types.ts";
+import type {
+	ContainerOutput,
+	EffortLevel,
+	ScheduledTask,
+	SessionProfile,
+} from "./types.ts";
 
 const log = pino({ name: "task-scheduler" });
 
@@ -19,6 +24,7 @@ export interface SchedulerDeps {
 			label?: string | undefined;
 			model?: string | undefined;
 			effort?: EffortLevel | undefined;
+			profile?: SessionProfile | undefined;
 		},
 	) => Promise<ContainerOutput>;
 	sendMessage: (chatId: number | string, text: string) => Promise<void>;

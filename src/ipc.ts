@@ -10,7 +10,7 @@ import {
 	resolveModelId,
 	WORKSPACES_DIR,
 } from "./config.ts";
-import type { EffortLevel, ScheduledTask } from "./types.ts";
+import type { EffortLevel, ScheduledTask, SessionProfile } from "./types.ts";
 
 const log = pino({ name: "ipc" });
 
@@ -191,6 +191,7 @@ function processTaskIpc(
 		chatId?: string;
 		model?: string;
 		effort?: string;
+		profile?: SessionProfile;
 	},
 	sourceChatId: string,
 	deps: IpcDeps,
@@ -227,6 +228,7 @@ function processTaskIpc(
 					if (data.model !== undefined)
 						existing.model = data.model || undefined;
 					if (effort !== undefined) existing.effort = effort;
+					if (data.profile !== undefined) existing.profile = data.profile;
 					deps.writeTasks(tasks);
 					deps.writeSnapshot(
 						chatId,
@@ -252,6 +254,7 @@ function processTaskIpc(
 				created_at: new Date().toISOString(),
 				...(data.model ? { model: data.model } : {}),
 				...(effort ? { effort } : {}),
+				...(data.profile ? { profile: data.profile } : {}),
 			};
 			tasks.push(task);
 			deps.writeTasks(tasks);
@@ -278,6 +281,7 @@ function processTaskIpc(
 			}
 			if (data.model !== undefined) task.model = data.model || undefined;
 			if (effort !== undefined) task.effort = effort;
+			if (data.profile !== undefined) task.profile = data.profile;
 			if (data.schedule_type && data.schedule_value) {
 				const nextRun = computeNextRun(data.schedule_type, data.schedule_value);
 				if (nextRun !== null) {

@@ -22,6 +22,14 @@ interface ImageAttachment {
 
 type EffortLevel = "low" | "medium" | "high" | "max" | "xhigh";
 
+interface SessionProfile {
+	persona?: string;
+	systemPromptOverlay?: string;
+	settingSources?: string[];
+	extraEnv?: Record<string, string>;
+	freshSession?: boolean;
+}
+
 interface ContainerInput {
 	prompt: string;
 	sessionId?: string;
@@ -31,6 +39,7 @@ interface ContainerInput {
 	secrets?: Record<string, string>;
 	images?: ImageAttachment[];
 	effort?: EffortLevel;
+	profile?: SessionProfile;
 }
 
 interface ContainerOutput {
@@ -264,6 +273,7 @@ async function runQuery(
 	systemPrompt: string,
 	resumeAt?: string,
 	effort?: EffortLevel,
+	settingSources?: string[],
 ): Promise<{
 	newSessionId?: string;
 	lastAssistantUuid?: string;
@@ -330,7 +340,7 @@ async function runQuery(
 			pathToClaudeCodeExecutable: "/usr/local/bin/claude",
 			permissionMode: "bypassPermissions",
 			allowDangerouslySkipPermissions: true,
-			settingSources: ["project", "user"],
+			settingSources: settingSources ?? ["project", "user"],
 			...(effort ? { effort } : {}),
 			hooks: {
 				PreToolUse: [{ matcher: "Bash", hooks: [createSanitizeBashHook()] }],
@@ -426,7 +436,14 @@ async function main(): Promise<void> {
 		sdkEnv["PICOCLAW_EFFORT"] = containerInput.effort;
 	}
 
-	let sessionId = containerInput.sessionId;
+	// Session profile: persona + env overrides (applied last so they win over secrets/process.env).
+	const profile = containerInput.profile;
+	if (profile?.persona) sdkEnv["PICOCLAW_PERSONA"] = profile.persona;
+	if (profile?.extraEnv) {
+		for (const [k, v] of Object.entries(profile.extraEnv)) sdkEnv[k] = v;
+	}
+
+	let sessionId = profile?.freshSession ? undefined : containerInput.sessionId;
 	fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
 
 	// Clean stale _close sentinel
@@ -437,14 +454,16 @@ async function main(): Promise<void> {
 	// Build system prompt with session context
 	let systemPrompt = SYSTEM_PROMPT;
 
-	// Workspace-specific system-level overlay (optional)
-	try {
-		const myPrompt = fs.readFileSync("/workspace/my-prompt.md", "utf8").trim();
-		if (myPrompt) {
-			systemPrompt += `\n\n${myPrompt}`;
+	// Workspace system-level overlay (optional). The profile may point at a different
+	// overlay or disable it ("" → boot without the operator constitution).
+	const overlayRel = profile?.systemPromptOverlay ?? "my-prompt.md";
+	if (overlayRel) {
+		try {
+			const overlay = fs.readFileSync(`/workspace/${overlayRel}`, "utf8").trim();
+			if (overlay) systemPrompt += `\n\n${overlay}`;
+		} catch {
+			// Overlay file absent — base SYSTEM_PROMPT is sufficient.
 		}
-	} catch {
-		// File doesn't exist — base SYSTEM_PROMPT is sufficient.
 	}
 
 	const contextLines: string[] = [];
@@ -510,6 +529,7 @@ async function main(): Promise<void> {
 				systemPrompt,
 				resumeAt,
 				containerInput.effort,
+				profile?.settingSources,
 			);
 			if (queryResult.newSessionId) sessionId = queryResult.newSessionId;
 			if (queryResult.lastAssistantUuid)
