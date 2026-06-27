@@ -65,8 +65,11 @@ for (const cfg of botConfigs) {
 /** Look up the BotConfig for a given chatId (via the client routing table). */
 function botConfigForChat(chatId: string): BotConfig | undefined {
 	const client = clientsByChatId.get(chatId);
-	if (!client) return undefined;
-	return configsByUserId.get(client.allowedUserId);
+	if (client) return configsByUserId.get(client.allowedUserId);
+	// Startup fallback: for a DM the chatId IS the allowedUserId, so the config is
+	// resolvable before the lazy clientsByChatId routing is populated by the first
+	// Telegram update — prevents cron-backlog readSecrets crashes on restart.
+	return configsByUserId.get(chatId);
 }
 
 /** Dispatcher: route sendMessage to the correct bot by chatId */

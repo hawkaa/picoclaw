@@ -307,7 +307,11 @@ export async function spawnContainer(
 		let hadStreamingOutput = false;
 		let outputChain = Promise.resolve();
 
-		const timeoutMs = Math.max(CONTAINER_TIMEOUT, IDLE_TIMEOUT + 30_000);
+		// Idle timer (reset on output) bounded by an absolute hard deadline that
+		// never moves: an agent that keeps emitting output can no longer keep a
+		// container alive past CONTAINER_TIMEOUT. The prior single reset-able timer
+		// had no ceiling, so active/looping sessions never timed out (orphan leak).
+		const hardDeadline = Date.now() + CONTAINER_TIMEOUT;
 		let timedOut = false;
 
 		const killOnTimeout = () => {
@@ -318,10 +322,12 @@ export async function spawnContainer(
 			});
 		};
 
-		let timeout = setTimeout(killOnTimeout, timeoutMs);
+		const nextTimeoutMs = () =>
+			Math.max(0, Math.min(IDLE_TIMEOUT, hardDeadline - Date.now()));
+		let timeout = setTimeout(killOnTimeout, nextTimeoutMs());
 		const resetTimeout = () => {
 			clearTimeout(timeout);
-			timeout = setTimeout(killOnTimeout, timeoutMs);
+			timeout = setTimeout(killOnTimeout, nextTimeoutMs());
 		};
 
 		proc.stdout?.on("data", (data: Buffer) => {
