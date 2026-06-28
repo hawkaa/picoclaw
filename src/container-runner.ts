@@ -12,6 +12,7 @@ import {
 	IDLE_TIMEOUT,
 	OUTPUT_END_MARKER,
 	OUTPUT_START_MARKER,
+	resolveModelId,
 	SEEDS_DIR,
 	WORKSPACES_DIR,
 } from "./config.ts";
@@ -287,6 +288,13 @@ export async function spawnContainer(
 	writeLog(`=== Session start: ${containerName} ===`);
 	writeLog(`=== prompt: ${input.prompt?.slice(0, 200)} ===`);
 	log.info({ chatId, logFile: currentLogFile }, "Container session started");
+
+	// Resolve model aliases (e.g. "opus") lazily at spawn time rather than at
+	// task-definition time, so a long-lived scheduled task always targets the
+	// current alias mapping instead of a version frozen when it was created.
+	// Idempotent for concrete IDs (passthrough), so existing tasks/sessions
+	// that already stored a resolved model keep working unchanged.
+	if (input.model) input.model = resolveModelId(input.model);
 
 	// Pass secrets via stdin
 	input.secrets = readSecrets(input.anthropicApiKey!, input.model);

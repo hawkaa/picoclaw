@@ -7,7 +7,6 @@ import {
 	DATA_DIR,
 	IPC_POLL_INTERVAL,
 	parseEffortLevel,
-	resolveModelId,
 	WORKSPACES_DIR,
 } from "./config.ts";
 import type { EffortLevel, ScheduledTask, SessionProfile } from "./types.ts";
@@ -179,7 +178,7 @@ function computeNextRun(
 	return null;
 }
 
-function processTaskIpc(
+export function processTaskIpc(
 	data: {
 		type: string;
 		taskId?: string;
@@ -198,7 +197,10 @@ function processTaskIpc(
 ): void {
 	const tasks = deps.readTasks();
 	const chatId = data.chatId || sourceChatId;
-	if (data.model) data.model = resolveModelId(data.model);
+	// NOTE: do NOT resolve model aliases here. Tasks persist the model verbatim
+	// (e.g. "opus") and resolve at spawn time in spawnContainer, so a recurring
+	// task tracks the current alias target instead of freezing the version that
+	// was current when the task was defined.
 	const effort: EffortLevel | undefined = data.effort
 		? (parseEffortLevel(data.effort) ?? undefined)
 		: undefined;
