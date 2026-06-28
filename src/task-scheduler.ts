@@ -32,8 +32,10 @@ export interface SchedulerDeps {
 
 /**
  * Compute the next_run value for a task after it has executed.
+ *
+ * Exported for tests.
  */
-function computeNextRun(task: ScheduledTask): string | null {
+export function computeNextRun(task: ScheduledTask): string | null {
 	if (task.schedule_type === "cron") {
 		try {
 			const interval = CronExpressionParser.parse(task.schedule_value);
@@ -59,21 +61,25 @@ function computeNextRun(task: ScheduledTask): string | null {
  * Strategy:
  *   - Start from the fresh copy (canonical ground truth).
  *   - For every task that the scheduler touched (present in `updates`),
- *     apply only the fields the scheduler is authorised to change:
- *     `next_run` and `status`.
+ *     apply only the field the scheduler is authorised to change: `status`.
+ *   - `next_run` is re-derived from the FRESH `schedule_type` / `schedule_value`,
+ *     so an IPC schedule change that landed during execution is honored.
+ *     (Computing it inside `runTask` against the stale snapshot would clobber
+ *     the IPC update.)
  *   - Tasks present in the fresh copy but absent from `updates` are
  *     left untouched (IPC additions are preserved).
  *   - Tasks present in `updates` but absent from the fresh copy are
  *     silently dropped (they were deleted via IPC while the task ran).
  */
-function mergeTasks(
+export function mergeTasks(
 	fresh: ScheduledTask[],
-	updates: Map<string, Pick<ScheduledTask, "next_run" | "status">>,
+	updates: Map<string, { status: ScheduledTask["status"] }>,
 ): ScheduledTask[] {
 	return fresh.map((task) => {
 		const update = updates.get(task.id);
 		if (!update) return task;
-		return { ...task, next_run: update.next_run, status: update.status };
+		const next_run = update.status === "paused" ? null : computeNextRun(task);
+		return { ...task, next_run, status: update.status };
 	});
 }
 
@@ -124,11 +130,11 @@ export function startTaskScheduler(deps: SchedulerDeps): void {
 		}
 
 		// Collect the scheduler-side mutations as each task finishes.
-		// Keyed by task.id → { next_run, status }.
-		const updates = new Map<
-			string,
-			Pick<ScheduledTask, "next_run" | "status">
-		>();
+		// Keyed by task.id → { status }. `next_run` is intentionally NOT
+		// recorded here; it is re-derived in `mergeTasks` from the FRESH
+		// task's schedule fields so IPC schedule updates that landed during
+		// execution are honored.
+		const updates = new Map<string, { status: ScheduledTask["status"] }>();
 
 		const sem = makeSemaphore(MAX_CONCURRENT_TASKS);
 
@@ -153,15 +159,11 @@ export function startTaskScheduler(deps: SchedulerDeps): void {
 				sem.release();
 			}
 
-			// Determine what the scheduler wants to store for this task.
-			if (task.schedule_type === "once") {
-				updates.set(task.id, { next_run: null, status: "paused" });
-			} else {
-				updates.set(task.id, {
-					next_run: computeNextRun(task),
-					status: "active",
-				});
-			}
+			// Record only the status the scheduler wants to store. `next_run`
+			// is computed later in `mergeTasks` against the fresh task.
+			updates.set(task.id, {
+				status: task.schedule_type === "once" ? "paused" : "active",
+			});
 		};
 
 		// Spawn all due tasks concurrently (bounded by semaphore).
