@@ -20,6 +20,7 @@ export const TASK_CHECK_INTERVAL = 60 * 1000; // 60s
 export const TELEGRAM_POLL_TIMEOUT = 30; // seconds
 
 export const MODEL_ALIASES: Record<string, string> = {
+	fable: "claude-fable-5",
 	opus: "claude-opus-4-8",
 	"opus-4.8": "claude-opus-4-8",
 	"opus-4.7": "claude-opus-4-7",
