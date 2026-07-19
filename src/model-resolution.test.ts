@@ -43,7 +43,7 @@ describe("resolveModelId (spawn-time resolution)", () => {
 	test("resolves a provider-backed alias to its model id", () => {
 		// resolveModelId stays string-in/string-out for all callers.
 		expect(resolveModelId("k3")).toBe("kimi-k3");
-		expect(resolveModelId("or-k3")).toBe("moonshotai/kimi-k3");
+		expect(resolveModelId("kimi")).toBe("moonshotai/kimi-k3");
 	});
 });
 
@@ -68,12 +68,29 @@ describe("resolveModelTarget (provider-aware resolution)", () => {
 		expect(target.provider?.authStyle).toBe("api-key");
 	});
 
-	test("or-k3 routes via OpenRouter with auth-token style", () => {
-		const target = resolveModelTarget("or-k3");
+	test("any vendor/model id routes via OpenRouter — no per-model hardcoding", () => {
+		for (const id of [
+			"moonshotai/kimi-k3",
+			"deepseek/deepseek-chat",
+			"openai/o3",
+		]) {
+			const target = resolveModelTarget(id);
+			expect(target.model).toBe(id);
+			expect(target.provider?.baseUrl).toBe("https://openrouter.ai/api");
+			expect(target.provider?.apiKeyEnvVar).toBe("OPENROUTER_API_KEY");
+			expect(target.provider?.authStyle).toBe("auth-token");
+		}
+	});
+
+	test("string aliases pointing at a vendor/model id inherit the OpenRouter provider", () => {
+		const target = resolveModelTarget("kimi");
 		expect(target.model).toBe("moonshotai/kimi-k3");
-		expect(target.provider?.baseUrl).toBe("https://openrouter.ai/api");
-		expect(target.provider?.apiKeyEnvVar).toBe("OPENROUTER_API_KEY");
 		expect(target.provider?.authStyle).toBe("auth-token");
+	});
+
+	test("Anthropic ids and aliases never get a provider (subscription auth untouched)", () => {
+		expect(resolveModelTarget("fable").provider).toBeUndefined();
+		expect(resolveModelTarget("claude-opus-4-8").provider).toBeUndefined();
 	});
 
 	test("is case-insensitive like resolveModelId", () => {

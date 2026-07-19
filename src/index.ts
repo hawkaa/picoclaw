@@ -683,7 +683,9 @@ async function handleMessage(
 			// Try as model alias or ID
 			if (!model) {
 				const resolved = resolveModelId(arg);
-				if (resolved !== arg || arg.includes("-")) {
+				// Accept: known aliases, concrete Anthropic ids (contain "-"),
+				// and OpenRouter vendor/model ids (contain "/").
+				if (resolved !== arg || arg.includes("-") || arg.includes("/")) {
 					// Store the alias verbatim — spawn-time resolution (see
 					// container-runner) maps it to a model id and, for
 					// provider-backed aliases like "k3", an endpoint config.

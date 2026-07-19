@@ -44,6 +44,17 @@ export interface ModelTarget {
 	provider?: ProviderConfig | undefined;
 }
 
+/**
+ * OpenRouter's Anthropic-compatible "skin". Any OpenRouter model id works
+ * through it — nothing is hardcoded per model.
+ * (https://openrouter.ai/docs — ANTHROPIC_AUTH_TOKEN + empty ANTHROPIC_API_KEY)
+ */
+export const OPENROUTER_PROVIDER: ProviderConfig = {
+	baseUrl: "https://openrouter.ai/api",
+	apiKeyEnvVar: "OPENROUTER_API_KEY",
+	authStyle: "auth-token",
+};
+
 export const MODEL_ALIASES: Record<string, string | ModelTarget> = {
 	fable: "claude-fable-5",
 	opus: "claude-opus-4-8",
@@ -52,7 +63,7 @@ export const MODEL_ALIASES: Record<string, string | ModelTarget> = {
 	"opus-4.6": "claude-opus-4-6",
 	sonnet: "claude-sonnet-4-6",
 	haiku: "claude-haiku-4-5-20251001",
-	// Kimi K3 via Moonshot's Anthropic-compatible endpoint
+	// Kimi K3 via Moonshot's own Anthropic-compatible endpoint
 	// (https://platform.kimi.ai/docs/guide/claude-code-kimi)
 	k3: {
 		model: "kimi-k3",
@@ -62,22 +73,25 @@ export const MODEL_ALIASES: Record<string, string | ModelTarget> = {
 			authStyle: "api-key",
 		},
 	},
-	// Kimi K3 via OpenRouter's Anthropic-compatible "skin"
-	// (https://openrouter.ai/docs — ANTHROPIC_AUTH_TOKEN + empty ANTHROPIC_API_KEY)
-	"or-k3": {
-		model: "moonshotai/kimi-k3",
-		provider: {
-			baseUrl: "https://openrouter.ai/api",
-			apiKeyEnvVar: "OPENROUTER_API_KEY",
-			authStyle: "auth-token",
-		},
-	},
+	// Convenience shorthand; the slash form routes via OpenRouter (see below)
+	kimi: "moonshotai/kimi-k3",
 };
+
+/**
+ * OpenRouter model ids are always "vendor/model"; Anthropic ids never contain
+ * a slash. Any slash-form id therefore routes via OpenRouter generically —
+ * `/new deepseek/deepseek-chat` works without touching this file.
+ */
+function inferProvider(model: string): ModelTarget {
+	return model.includes("/")
+		? { model, provider: OPENROUTER_PROVIDER }
+		: { model };
+}
 
 export function resolveModelTarget(alias: string): ModelTarget {
 	const entry = MODEL_ALIASES[alias.toLowerCase()];
-	if (entry === undefined) return { model: alias };
-	return typeof entry === "string" ? { model: entry } : entry;
+	if (entry === undefined) return inferProvider(alias);
+	return typeof entry === "string" ? inferProvider(entry) : entry;
 }
 
 export function resolveModelId(alias: string): string {
