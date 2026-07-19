@@ -20,6 +20,7 @@ import {
 import type {
 	ContainerInput,
 	ContainerOutput,
+	EffortLevel,
 	ImageAttachment,
 } from "./types.ts";
 
@@ -49,10 +50,28 @@ function chmodRecursive(dir: string): void {
 	}
 }
 
-function readSecrets(
+/**
+ * Non-Anthropic backends don't understand the adaptive-thinking `effort`
+ * beta the SDK sends for Claude models — they steer reasoning depth via the
+ * Anthropic-protocol `thinking.budget_tokens`, which the Claude CLI derives
+ * from MAX_THINKING_TOKENS (env wins over settings). OpenRouter maps that
+ * budget onto the model's reasoning config, so `/new kimi high` actually
+ * changes Kimi's thinking depth. Budgets are hard caps, not adaptive:
+ * a too-low budget can truncate reasoning mid-thought on hard problems.
+ */
+export const PROVIDER_THINKING_BUDGETS: Record<EffortLevel, number> = {
+	low: 2000,
+	medium: 8000,
+	high: 16000,
+	max: 32000,
+	xhigh: 32000,
+};
+
+export function readSecrets(
 	anthropicApiKey: string,
 	modelOverride?: string | undefined,
 	provider?: ProviderConfig | undefined,
+	effort?: EffortLevel | undefined,
 ): Record<string, string> {
 	const secrets: Record<string, string> = {};
 	const envModel = process.env["ANTHROPIC_MODEL"];
@@ -72,6 +91,13 @@ function readSecrets(
 			secrets["ANTHROPIC_API_KEY"] = "";
 		} else {
 			secrets["ANTHROPIC_API_KEY"] = providerKey;
+		}
+		// Effort only maps to a thinking budget for provider-backed models;
+		// Claude models keep the SDK's native adaptive-thinking effort.
+		if (effort) {
+			secrets["MAX_THINKING_TOKENS"] = String(
+				PROVIDER_THINKING_BUDGETS[effort],
+			);
 		}
 	} else if (anthropicApiKey.startsWith("sk-ant-oat")) {
 		secrets["CLAUDE_CODE_OAUTH_TOKEN"] = anthropicApiKey;
@@ -323,7 +349,12 @@ export async function spawnContainer(
 	}
 
 	// Pass secrets via stdin
-	input.secrets = readSecrets(input.anthropicApiKey!, input.model, provider);
+	input.secrets = readSecrets(
+		input.anthropicApiKey!,
+		input.model,
+		provider,
+		input.effort,
+	);
 	input.anthropicApiKey = undefined;
 	// Inject AgentLair AAT if issued by the host
 	if (input.agentlairAAT) {
