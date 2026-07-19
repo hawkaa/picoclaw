@@ -13,6 +13,8 @@ import {
 	type HookCallback,
 	type PreToolUseHookInput,
 	query,
+	type SDKUserMessage,
+	type SettingSource,
 } from "@anthropic-ai/claude-agent-sdk";
 
 interface ImageAttachment {
@@ -25,7 +27,7 @@ type EffortLevel = "low" | "medium" | "high" | "max" | "xhigh";
 interface SessionProfile {
 	persona?: string;
 	systemPromptOverlay?: string;
-	settingSources?: string[];
+	settingSources?: SettingSource[];
 	extraEnv?: Record<string, string>;
 	freshSession?: boolean;
 }
@@ -45,9 +47,9 @@ interface ContainerInput {
 interface ContainerOutput {
 	status: "success" | "error";
 	result: string | null;
-	newSessionId?: string;
-	error?: string;
-	type?: "text" | "result";
+	newSessionId?: string | undefined;
+	error?: string | undefined;
+	type?: "text" | "result" | undefined;
 }
 
 // Content block types matching Anthropic API
@@ -58,13 +60,6 @@ type ImageBlock = {
 };
 type ContentBlock = TextBlock | ImageBlock;
 type MessageContent = string | ContentBlock[];
-
-interface SDKUserMessage {
-	type: "user";
-	message: { role: "user"; content: MessageContent };
-	parent_tool_use_id: null;
-	session_id: string;
-}
 
 const IPC_INPUT_DIR = "/ipc/input";
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, "_close");
@@ -117,7 +112,12 @@ class MessageStream {
 	push(content: MessageContent): void {
 		this.queue.push({
 			type: "user",
-			message: { role: "user", content },
+			// Our ImageBlock mirrors the API shape but types media_type as plain
+			// string (it arrives from host JSON); the SDK wants the literal union.
+			message: {
+				role: "user",
+				content: content as SDKUserMessage["message"]["content"],
+			},
 			parent_tool_use_id: null,
 			session_id: "",
 		});
@@ -131,8 +131,11 @@ class MessageStream {
 
 	async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
 		while (true) {
-			while (this.queue.length > 0) {
-				const msg = this.queue.shift()!;
+			for (
+				let msg = this.queue.shift();
+				msg !== undefined;
+				msg = this.queue.shift()
+			) {
 				// Use the current session ID (set after system/init message arrives)
 				msg.session_id = this.sessionId;
 				yield msg;
@@ -277,10 +280,10 @@ async function runQuery(
 	systemPrompt: string,
 	resumeAt?: string,
 	effort?: EffortLevel,
-	settingSources?: string[],
+	settingSources?: SettingSource[],
 ): Promise<{
-	newSessionId?: string;
-	lastAssistantUuid?: string;
+	newSessionId?: string | undefined;
+	lastAssistantUuid?: string | undefined;
 	closedDuringQuery: boolean;
 }> {
 	const stream = new MessageStream();
@@ -320,8 +323,8 @@ async function runQuery(
 		prompt: stream,
 		options: {
 			cwd: "/workspace",
-			resume: sessionId,
-			resumeSessionAt: resumeAt,
+			...(sessionId !== undefined ? { resume: sessionId } : {}),
+			...(resumeAt !== undefined ? { resumeSessionAt: resumeAt } : {}),
 			systemPrompt,
 			allowedTools: [
 				"Bash",
@@ -394,7 +397,12 @@ async function runQuery(
 			log(
 				`Result #${resultCount}: stop_reason=${stopReason}, textResult=${textResult ? `"${textResult.slice(0, 200)}"` : "null"}, assistantTexts=${assistantTexts.length} blocks (${allAssistantText.length} chars), finalResult=${finalResult ? `"${finalResult.slice(0, 200)}"` : "null"}`,
 			);
-			writeOutput({ status: "success", result: null, newSessionId, type: "result" });
+			writeOutput({
+				status: "success",
+				result: null,
+				newSessionId,
+				type: "result",
+			});
 			assistantTexts.length = 0;
 		}
 	}
@@ -463,7 +471,9 @@ async function main(): Promise<void> {
 	const overlayRel = profile?.systemPromptOverlay ?? "my-prompt.md";
 	if (overlayRel) {
 		try {
-			const overlay = fs.readFileSync(`/workspace/${overlayRel}`, "utf8").trim();
+			const overlay = fs
+				.readFileSync(`/workspace/${overlayRel}`, "utf8")
+				.trim();
 			if (overlay) systemPrompt += `\n\n${overlay}`;
 		} catch {
 			// Overlay file absent — base SYSTEM_PROMPT is sufficient.
@@ -555,8 +565,9 @@ async function main(): Promise<void> {
 			}
 
 			// Merge all pending messages into a single content payload
-			if (nextMessages.length === 1) {
-				initialContent = nextMessages[0].content;
+			const [onlyMessage] = nextMessages;
+			if (onlyMessage && nextMessages.length === 1) {
+				initialContent = onlyMessage.content;
 			} else {
 				// Multiple messages: concatenate text, collect images
 				const blocks: ContentBlock[] = [];
