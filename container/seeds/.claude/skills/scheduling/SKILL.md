@@ -53,6 +53,31 @@ If omitted, the task uses the system default at the time it runs.
 
 Always use a label for recurring tasks so re-runs of your setup logic are safe.
 
+### Injectable secrets
+
+A task runs with the standard harness secrets only. To give a task an extra
+host-held secret (e.g. an API key for an in-session inference call), list its
+NAME in a `"secrets"` array. The host injects the value as an env var into that
+session — but only if the name is present in the host-side whitelist. A name
+that is not whitelisted (or is a reserved harness key) is a **hard error** and
+the task will not run.
+
+```json
+{
+  "type": "schedule",
+  "label": "inference-task",
+  "prompt": "Summarize today's signals via an OpenRouter model.",
+  "schedule_type": "cron",
+  "schedule_value": "0 9 * * *",
+  "secrets": ["OPENROUTER_API_KEY"]
+}
+```
+
+You declare only the name; the host decides where the value comes from and never
+logs the value (injections are audited by name). Requesting a name the host has
+not whitelisted fails closed — ask the operator to add it host-side rather than
+retrying. Clear the field on an existing task with `"secrets": []`.
+
 ### Schedule types
 
 | type | schedule_value | example |

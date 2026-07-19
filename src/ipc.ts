@@ -191,6 +191,7 @@ export function processTaskIpc(
 		model?: string;
 		effort?: string;
 		profile?: SessionProfile;
+		secrets?: string[];
 	},
 	sourceChatId: string,
 	deps: IpcDeps,
@@ -231,6 +232,8 @@ export function processTaskIpc(
 						existing.model = data.model || undefined;
 					if (effort !== undefined) existing.effort = effort;
 					if (data.profile !== undefined) existing.profile = data.profile;
+					if (data.secrets !== undefined)
+						existing.secrets = data.secrets.length ? data.secrets : undefined;
 					deps.writeTasks(tasks);
 					deps.writeSnapshot(
 						chatId,
@@ -257,6 +260,7 @@ export function processTaskIpc(
 				...(data.model ? { model: data.model } : {}),
 				...(effort ? { effort } : {}),
 				...(data.profile ? { profile: data.profile } : {}),
+				...(data.secrets?.length ? { secrets: data.secrets } : {}),
 			};
 			tasks.push(task);
 			deps.writeTasks(tasks);
@@ -284,6 +288,8 @@ export function processTaskIpc(
 			if (data.model !== undefined) task.model = data.model || undefined;
 			if (effort !== undefined) task.effort = effort;
 			if (data.profile !== undefined) task.profile = data.profile;
+			if (data.secrets !== undefined)
+				task.secrets = data.secrets.length ? data.secrets : undefined;
 			if (data.schedule_type && data.schedule_value) {
 				const nextRun = computeNextRun(data.schedule_type, data.schedule_value);
 				if (nextRun !== null) {

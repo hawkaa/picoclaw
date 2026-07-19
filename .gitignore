@@ -4,3 +4,4 @@ data/
 .env
 dist/
 bots.json
+injectable-secrets.json

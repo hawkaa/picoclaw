@@ -17,6 +17,7 @@ import {
 	SEEDS_DIR,
 	WORKSPACES_DIR,
 } from "./config.ts";
+import { resolveInjectableSecrets } from "./injectable-secrets.ts";
 import type {
 	ContainerInput,
 	ContainerOutput,
@@ -278,6 +279,21 @@ export async function spawnContainer(
 	const now = Date.now();
 	const containerName = `picoclaw-${chatId}-${now}`;
 
+	// Resolve any host secrets this task explicitly declared (task/cron `secrets`
+	// field) BEFORE spawning the container. Fail closed: an unwhitelisted,
+	// reserved, or unresolvable name throws here, aborting the spawn instead of
+	// leaving an orphaned, stdin-starved container running. The name->value map
+	// is merged into the stdin secrets channel below; names (never values) are
+	// audited host-side inside resolveInjectableSecrets.
+	const injectedSecrets =
+		input.requestedSecrets && input.requestedSecrets.length > 0
+			? resolveInjectableSecrets(input.requestedSecrets, {
+					chatId,
+					label: input.caller?.name ?? null,
+				})
+			: {};
+	input.requestedSecrets = undefined;
+
 	// Per-session log file (renamed to include session ID once known)
 	const logsDir = path.join(base, "logs");
 	fs.mkdirSync(logsDir, { recursive: true });
@@ -361,6 +377,10 @@ export async function spawnContainer(
 		input.secrets["AGENTLAIR_AAT"] = input.agentlairAAT;
 		input.agentlairAAT = undefined;
 	}
+	// Merge the task-declared, whitelisted host secrets resolved above. Applied
+	// after the harness keys; reserved names were already rejected pre-spawn, so
+	// these can only be non-harness values.
+	Object.assign(input.secrets, injectedSecrets);
 	proc.stdin?.write(JSON.stringify(input));
 	proc.stdin?.end();
 	input.secrets = undefined;

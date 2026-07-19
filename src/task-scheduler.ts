@@ -25,6 +25,7 @@ export interface SchedulerDeps {
 			model?: string | undefined;
 			effort?: EffortLevel | undefined;
 			profile?: SessionProfile | undefined;
+			secrets?: string[] | undefined;
 		},
 	) => Promise<ContainerOutput>;
 	sendMessage: (chatId: number | string, text: string) => Promise<void>;

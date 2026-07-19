@@ -28,6 +28,38 @@ Reflections, patterns, and knowledge are stored in a Turso SQLite database (quer
 **Identity**  
 Each session is issued an EdDSA JWT (`$AGENTLAIR_AAT`) with a 1-hour TTL, verifiable via JWKS. Agents authenticate to external services using this token — the host API key never enters the container.
 
+**Per-task secret injection**  
+A task or cron can declare host-held secrets it needs (`"secrets": ["OPENROUTER_API_KEY"]`); the host injects them as env vars into that session only. It is opt-in per task, gated by a host-side whitelist (`injectable-secrets.json`), and audited by name. See below.
+
+## Injectable secrets
+
+Sessions normally receive only the fixed harness secrets (model auth, `AGENTLAIR_AAT`). A task that needs an extra host-held secret — e.g. `OPENROUTER_API_KEY` for an in-session inference call — declares it:
+
+```json
+{ "type": "schedule", "label": "inference-task", "prompt": "...",
+  "schedule_type": "cron", "schedule_value": "0 9 * * *",
+  "secrets": ["OPENROUTER_API_KEY"] }
+```
+
+The host resolves each declared name against a whitelist and injects the value as an env var into that container's session (via the same stdin channel the harness keys use). Copy `injectable-secrets.example.json` to `injectable-secrets.json` (gitignored) and map each allowed name to its source:
+
+```json
+{
+  "OPENROUTER_API_KEY": { "env": "OPENROUTER_API_KEY" },
+  "BRAVE_API_KEY": "BRAVE_SEARCH_KEY",
+  "SOME_SERVICE_TOKEN": { "file": "/home/user/.secrets/some_service_token" }
+}
+```
+
+An entry maps a name to `{ "env": "VAR" }`, `{ "file": "/path" }`, or the shorthand `"VAR"` (env). Paths default to `injectable-secrets.json` and `data/secret-injections.jsonl` beside the process; override with `PICOCLAW_INJECTABLE_SECRETS_FILE` / `PICOCLAW_SECRET_AUDIT_LOG`.
+
+**Threat model.** Containers run agent-authored code, so the injection path is deliberately narrow:
+
+- **Opt-in per task.** Only names a task lists in `secrets` are considered; a task that declares nothing gets nothing beyond the harness set.
+- **Whitelisted host-side.** The task author names a secret; the *host* alone decides whether — and from where — it resolves. A name absent from the whitelist is a **hard spawn error (fail closed)**, never a silent skip, so a typo or an unauthorized name aborts the run rather than starting with a partial secret set. Resolution happens *before* the container spawns, so a rejection leaves no orphaned process.
+- **Reserved names are unreachable.** Harness-managed keys (`ANTHROPIC_*`, `CLAUDE_CODE_OAUTH_TOKEN`, `MAX_THINKING_TOKENS`, `AGENTLAIR_AAT`) can never be injected, even if the whitelist mistakenly lists one — a task cannot hijack its own auth, model, or routing.
+- **Audited by name only.** Every injection appends `{ts, chatId, taskId, label, names[]}` to the audit log. **Values are never logged.**
+
 ## Architecture
 
 ```
