@@ -684,7 +684,10 @@ async function handleMessage(
 			if (!model) {
 				const resolved = resolveModelId(arg);
 				if (resolved !== arg || arg.includes("-")) {
-					model = resolved;
+					// Store the alias verbatim — spawn-time resolution (see
+					// container-runner) maps it to a model id and, for
+					// provider-backed aliases like "k3", an endpoint config.
+					model = arg;
 					continue;
 				}
 				const aliases = Object.keys(MODEL_ALIASES).join(", ");

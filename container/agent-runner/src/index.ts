@@ -169,7 +169,11 @@ async function readStdin(): Promise<string> {
 }
 
 // Secrets to strip from Bash subprocesses
-const SECRET_ENV_VARS = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"];
+const SECRET_ENV_VARS = [
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_AUTH_TOKEN",
+	"CLAUDE_CODE_OAUTH_TOKEN",
+];
 
 function createSanitizeBashHook(): HookCallback {
 	return async (input, _toolUseId, _context) => {

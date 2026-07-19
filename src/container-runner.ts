@@ -12,7 +12,8 @@ import {
 	IDLE_TIMEOUT,
 	OUTPUT_END_MARKER,
 	OUTPUT_START_MARKER,
-	resolveModelId,
+	type ProviderConfig,
+	resolveModelTarget,
 	SEEDS_DIR,
 	WORKSPACES_DIR,
 } from "./config.ts";
@@ -51,11 +52,28 @@ function chmodRecursive(dir: string): void {
 function readSecrets(
 	anthropicApiKey: string,
 	modelOverride?: string | undefined,
+	provider?: ProviderConfig | undefined,
 ): Record<string, string> {
 	const secrets: Record<string, string> = {};
 	const envModel = process.env["ANTHROPIC_MODEL"];
 	if (envModel) secrets["ANTHROPIC_MODEL"] = envModel;
-	if (anthropicApiKey.startsWith("sk-ant-oat")) {
+	if (provider) {
+		const providerKey = process.env[provider.apiKeyEnvVar];
+		if (!providerKey) {
+			throw new Error(
+				`Model routes to ${provider.baseUrl} but ${provider.apiKeyEnvVar} is not set in the host environment`,
+			);
+		}
+		secrets["ANTHROPIC_BASE_URL"] = provider.baseUrl;
+		if (provider.authStyle === "auth-token") {
+			secrets["ANTHROPIC_AUTH_TOKEN"] = providerKey;
+			// OpenRouter's Anthropic skin requires ANTHROPIC_API_KEY to be
+			// explicitly empty so the SDK doesn't fall back to it.
+			secrets["ANTHROPIC_API_KEY"] = "";
+		} else {
+			secrets["ANTHROPIC_API_KEY"] = providerKey;
+		}
+	} else if (anthropicApiKey.startsWith("sk-ant-oat")) {
 		secrets["CLAUDE_CODE_OAUTH_TOKEN"] = anthropicApiKey;
 	} else {
 		secrets["ANTHROPIC_API_KEY"] = anthropicApiKey;
@@ -294,10 +312,18 @@ export async function spawnContainer(
 	// current alias mapping instead of a version frozen when it was created.
 	// Idempotent for concrete IDs (passthrough), so existing tasks/sessions
 	// that already stored a resolved model keep working unchanged.
-	if (input.model) input.model = resolveModelId(input.model);
+	// Provider-backed aliases (e.g. "k3") additionally carry an
+	// Anthropic-compatible endpoint config that is injected as env vars —
+	// same harness, different backend.
+	let provider: ProviderConfig | undefined;
+	if (input.model) {
+		const target = resolveModelTarget(input.model);
+		input.model = target.model;
+		provider = target.provider;
+	}
 
 	// Pass secrets via stdin
-	input.secrets = readSecrets(input.anthropicApiKey!, input.model);
+	input.secrets = readSecrets(input.anthropicApiKey!, input.model, provider);
 	input.anthropicApiKey = undefined;
 	// Inject AgentLair AAT if issued by the host
 	if (input.agentlairAAT) {
