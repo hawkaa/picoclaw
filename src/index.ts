@@ -35,6 +35,7 @@ import type {
 	SessionData,
 	SessionProfile,
 } from "./types.ts";
+import { startUsageProbe } from "./usage-probe.ts";
 import { commitWorkspace, ensureWorkspaceGit } from "./workspace-git.ts";
 
 const log = pino({
@@ -985,6 +986,11 @@ async function main(): Promise<void> {
 		spawnEphemeral,
 		sendMessage: dispatchMessage,
 	});
+
+	// Probe the host's Claude subscription usage and publish it to each chat's
+	// /ipc/usage-status.json so containers (which are not logged in) can pace
+	// themselves. Refreshes every <=15 min and on each spawn.
+	startUsageProbe();
 
 	// Register bots with audit client (logs which key each bot uses)
 	for (const cfg of botConfigs) {

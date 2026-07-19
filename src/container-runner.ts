@@ -23,6 +23,11 @@ import type {
 	EffortLevel,
 	ImageAttachment,
 } from "./types.ts";
+import {
+	appendLimitEvent,
+	classifyLimitError,
+	writeUsageSnapshotToChat,
+} from "./usage-probe.ts";
 
 const log = pino({ name: "container-runner" });
 
@@ -278,6 +283,11 @@ export async function spawnContainer(
 	const now = Date.now();
 	const containerName = `picoclaw-${chatId}-${now}`;
 
+	// Publish the latest subscription-usage snapshot into this chat's /ipc so the
+	// session can read /ipc/usage-status.json (the container itself is not logged
+	// in and cannot query usage). No-ops until the probe has produced a snapshot.
+	writeUsageSnapshotToChat(chatId);
+
 	// Per-session log file (renamed to include session ID once known)
 	const logsDir = path.join(base, "logs");
 	fs.mkdirSync(logsDir, { recursive: true });
@@ -371,6 +381,13 @@ export async function spawnContainer(
 		let newSessionId: string | undefined;
 		let hadStreamingOutput = false;
 		let outputChain = Promise.resolve();
+		// Tail of stderr + any streamed error payloads, scanned on exit for a
+		// rate-limit / usage-exhausted signature so we can log a limit event.
+		let stderrTail = "";
+		let errorOutputText = "";
+		let sawErrorOutput = false;
+		const appendTail = (prev: string, chunk: string): string =>
+			`${prev}${chunk}`.slice(-65536);
 
 		// Idle timer (reset on output) bounded by an absolute hard deadline that
 		// never moves: an agent that keeps emitting output can no longer keep a
@@ -421,6 +438,13 @@ export async function spawnContainer(
 							newSessionId = parsed.newSessionId;
 							renameLogWithSession(parsed.newSessionId);
 						}
+						if (parsed.status === "error" && parsed.error) {
+							sawErrorOutput = true;
+							errorOutputText = appendTail(
+								errorOutputText,
+								`\n${parsed.error}`,
+							);
+						}
 						hadStreamingOutput = true;
 						resetTimeout();
 						outputChain = outputChain.then(() => onOutput(parsed));
@@ -432,6 +456,7 @@ export async function spawnContainer(
 		});
 
 		proc.stderr?.on("data", (data: Buffer) => {
+			stderrTail = appendTail(stderrTail, data.toString());
 			const lines = data.toString().trim().split("\n");
 			for (const line of lines) {
 				if (!line) continue;
@@ -450,6 +475,21 @@ export async function spawnContainer(
 			clearTimeout(timeout);
 			writeLog(`=== Session end: exit code ${code} ===`);
 			logStream.end();
+
+			// If the session failed, check whether it "ran out of limits" and, if
+			// so, register the event. Gated on an actual failure (non-zero exit or
+			// an explicit error output) so benign log mentions never false-trigger.
+			if (code !== 0 || sawErrorOutput) {
+				const cls = classifyLimitError(`${stderrTail}\n${errorOutputText}`);
+				if (cls) {
+					appendLimitEvent({
+						chatId,
+						errorClass: cls,
+						label: input.caller?.name ?? null,
+						detail: (errorOutputText || stderrTail).trim().slice(-300),
+					});
+				}
+			}
 
 			if (timedOut && hadStreamingOutput) {
 				outputChain.then(() =>
