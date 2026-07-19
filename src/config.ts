@@ -19,7 +19,43 @@ export const IPC_POLL_INTERVAL = 1000; // 1s
 export const TASK_CHECK_INTERVAL = 60 * 1000; // 60s
 export const TELEGRAM_POLL_TIMEOUT = 30; // seconds
 
-export const MODEL_ALIASES: Record<string, string> = {
+/**
+ * Non-Anthropic providers exposing an Anthropic-compatible API. The Claude
+ * Agent SDK is pointed at them purely via environment variables, so the
+ * harness (system prompt, CLAUDE.md, skills, hooks, IPC) is identical across
+ * providers.
+ */
+export interface ProviderConfig {
+	/** Anthropic-compatible endpoint, injected as ANTHROPIC_BASE_URL. */
+	baseUrl: string;
+	/** Host env var holding the provider API key (never stored in bots.json). */
+	apiKeyEnvVar: string;
+	/**
+	 * How the endpoint authenticates:
+	 * - "api-key": key goes in ANTHROPIC_API_KEY (Moonshot style)
+	 * - "auth-token": key goes in ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY
+	 *   must be explicitly empty (OpenRouter style)
+	 */
+	authStyle: "api-key" | "auth-token";
+}
+
+export interface ModelTarget {
+	model: string;
+	provider?: ProviderConfig | undefined;
+}
+
+/**
+ * OpenRouter's Anthropic-compatible "skin". Any OpenRouter model id works
+ * through it — nothing is hardcoded per model.
+ * (https://openrouter.ai/docs — ANTHROPIC_AUTH_TOKEN + empty ANTHROPIC_API_KEY)
+ */
+export const OPENROUTER_PROVIDER: ProviderConfig = {
+	baseUrl: "https://openrouter.ai/api",
+	apiKeyEnvVar: "OPENROUTER_API_KEY",
+	authStyle: "auth-token",
+};
+
+export const MODEL_ALIASES: Record<string, string | ModelTarget> = {
 	fable: "claude-fable-5",
 	opus: "claude-opus-4-8",
 	"opus-4.8": "claude-opus-4-8",
@@ -27,10 +63,39 @@ export const MODEL_ALIASES: Record<string, string> = {
 	"opus-4.6": "claude-opus-4-6",
 	sonnet: "claude-sonnet-4-6",
 	haiku: "claude-haiku-4-5-20251001",
+	// Kimi K3 via Moonshot's own Anthropic-compatible endpoint
+	// (https://platform.kimi.ai/docs/guide/claude-code-kimi)
+	k3: {
+		model: "kimi-k3",
+		provider: {
+			baseUrl: "https://api.moonshot.ai/anthropic",
+			apiKeyEnvVar: "MOONSHOT_API_KEY",
+			authStyle: "api-key",
+		},
+	},
+	// Convenience shorthand; the slash form routes via OpenRouter (see below)
+	kimi: "moonshotai/kimi-k3",
 };
 
+/**
+ * OpenRouter model ids are always "vendor/model"; Anthropic ids never contain
+ * a slash. Any slash-form id therefore routes via OpenRouter generically —
+ * `/new deepseek/deepseek-chat` works without touching this file.
+ */
+function inferProvider(model: string): ModelTarget {
+	return model.includes("/")
+		? { model, provider: OPENROUTER_PROVIDER }
+		: { model };
+}
+
+export function resolveModelTarget(alias: string): ModelTarget {
+	const entry = MODEL_ALIASES[alias.toLowerCase()];
+	if (entry === undefined) return inferProvider(alias);
+	return typeof entry === "string" ? inferProvider(entry) : entry;
+}
+
 export function resolveModelId(alias: string): string {
-	return MODEL_ALIASES[alias.toLowerCase()] ?? alias;
+	return resolveModelTarget(alias).model;
 }
 
 const VALID_EFFORT_LEVELS = new Set<EffortLevel>([
