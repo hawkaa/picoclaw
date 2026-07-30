@@ -234,6 +234,23 @@ export async function resolveImage(chatId: string): Promise<string> {
 	hashes[chatId] = currentHash;
 	writeImageHashes(hashes);
 	log.info({ chatId, image: perChatImage }, "Per-chat image built");
+
+	// Rebuilding onto the same `:latest` tag untags the previous image, which then
+	// sits on disk forever as a dangling layer set. Per-chat images are large
+	// (a Dockerfile.extra with chromium + rust + foundry + node measured 4.4 GB on
+	// 2026-07-30), so a few edits fill the containerd filesystem — at which point
+	// every container fails on `mkdir /tmp/...: ENOSPC` and the whole host wedges.
+	// `image prune -f` only touches untagged images no container references, so a
+	// concurrently running session cannot lose its image.
+	exec("docker image prune -f", { timeout: 120_000 }, (err, stdout) => {
+		if (err) log.warn({ err }, "Dangling image prune failed");
+		else
+			log.info(
+				{ reclaimed: stdout.trim().split("\n").pop() },
+				"Pruned dangling images",
+			);
+	});
+
 	return perChatImage;
 }
 
