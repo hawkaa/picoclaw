@@ -1,4 +1,4 @@
-FROM oven/bun:slim
+FROM oven/bun:1.3.14-slim
 
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
