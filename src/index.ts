@@ -803,6 +803,7 @@ async function spawnEphemeral(
 		model?: string | undefined;
 		effort?: EffortLevel | undefined;
 		profile?: SessionProfile | undefined;
+		secrets?: string[] | undefined;
 	},
 ): Promise<ContainerOutput> {
 	seedWorkspace(chatId);
@@ -853,6 +854,7 @@ async function spawnEphemeral(
 			agentlairAAT: ephAAT,
 			effort: task.effort ?? ephBotCfg?.defaultEffort,
 			profile: task.profile,
+			requestedSecrets: task.secrets,
 		},
 		async (output) => {
 			if (output.newSessionId) {

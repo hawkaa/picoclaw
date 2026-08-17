@@ -39,6 +39,10 @@ export interface ContainerInput {
 	isScheduledTask?: boolean;
 	caller?: { name: string; source: "telegram" | "scheduler" } | undefined;
 	secrets?: Record<string, string> | undefined;
+	/** Host-secret NAMES this session declared (task/cron `secrets` field). The
+	 *  host resolves them against its whitelist and merges the values into
+	 *  `secrets` before spawn; the names never reach the container. */
+	requestedSecrets?: string[] | undefined;
 	model?: string | undefined;
 	anthropicApiKey?: string | undefined;
 	agentlairAAT?: string | undefined;
@@ -78,6 +82,10 @@ export interface ScheduledTask {
 	model?: string | undefined;
 	effort?: EffortLevel | undefined;
 	profile?: SessionProfile | undefined;
+	/** Host-held secret NAMES to inject into this task's container. Each name
+	 *  must be present in the host-side injectable-secrets whitelist or the
+	 *  spawn fails closed. Values are never stored here — only names. */
+	secrets?: string[] | undefined;
 }
 
 export interface SessionData {
