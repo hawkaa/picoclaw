@@ -28,6 +28,32 @@ Reflections, patterns, and knowledge are stored in a Turso SQLite database (quer
 **Identity**  
 Each session is issued an EdDSA JWT (`$AGENTLAIR_AAT`) with a 1-hour TTL, verifiable via JWKS. Agents authenticate to external services using this token — the host API key never enters the container.
 
+## Signed Agent Identity (optional, via AgentLair)
+
+Set `agentlairApiKey` per bot in `bots.json` to opt that bot into three capabilities. Omit it to run PicoClaw without external identity. AgentLair outages do not block PicoClaw startup or session execution; every call is non-blocking with a logged warning on failure.
+
+**AAT (Agent Auth Token)**  
+EdDSA-signed JWT issued per session, JWKS-verifiable at `agentlair.dev/.well-known/jwks.json`. Agents prove who they are to external services without ever seeing the host API key.
+
+**Audit telemetry**  
+Session lifecycle and tool-use events forwarded to AgentLair. Write-only from the host; the container cannot read the audit trail.
+
+**PoPA streak (Proof of Persistent Activity)**  
+Daily continuity attestation per bot. Provable record that the same agent has been online and operating for N consecutive days, queryable at `GET agentlair.dev/v1/popa/<principal>`.
+
+Each capability has its own toggle (`agentlairAAT`, `agentlairAudit`, `agentlairPoPA`). All default to enabled when `agentlairApiKey` is set; flip any to `false` to disable that one alone. Override the principal DID with `agentlairPrincipal`; otherwise it's auto-derived as `did:web:agentlair.dev:picoclaw:<botName>`.
+
+Inside the container, agents can verify any AAT with the seeded helper:
+
+```bash
+bun /workspace/agentlair-verify.ts            # verifies $AGENTLAIR_AAT
+bun /workspace/agentlair-verify.ts <token>    # verifies an explicit token
+```
+
+See `bots.json.example` for a fully-annotated configuration.
+
+> AgentLair is operated by the same author as PicoClaw. Use is fully optional; PicoClaw works identically without it.
+
 ## Architecture
 
 ```
