@@ -1,8 +1,22 @@
 import { describe, expect, test } from "bun:test";
+import {
+	chmodSync,
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { resolveModelTarget, XAI_PROVIDER } from "./config.ts";
+import {
+	CONTAINER_TIMEOUT,
+	resolveModelTarget,
+	XAI_PROVIDER,
+} from "./config.ts";
 import { readSecrets } from "./container-runner.ts";
-import { parseXaiAuth } from "./xai-oauth.ts";
+import { parseXaiAuth, resolveXaiAccessToken } from "./xai-oauth.ts";
 
 /**
  * Grok on a flat-price subscription instead of per-token billing. The
@@ -132,5 +146,98 @@ describe("readSecrets with a credential-minting provider", () => {
 				undefined,
 			),
 		).toThrow(/grok login --device-auth/);
+	});
+});
+
+/**
+ * The token is resolved ONCE, at container spawn, and never re-read. So the
+ * only question that matters is not "is it valid now" but "will it still be
+ * valid when this container hits its hard timeout". These tests drive the real
+ * refresh seam — a stub binary on $GROK_BIN standing in for xAI's CLI — rather
+ * than mocking the module, because the seam is a process spawn and a file
+ * rewrite, which is exactly where it breaks.
+ */
+describe("resolveXaiAccessToken lifetime margin", () => {
+	const MIN = 60 * 1000;
+
+	function withStubbedGrokHome(
+		expiresInMs: number,
+		run: (dir: string, ranMarker: string) => void,
+	): void {
+		const dir = mkdtempSync(join(tmpdir(), "grok-home-"));
+		const ranMarker = join(dir, "refresh-ran");
+		const authPath = join(dir, "auth.json");
+		writeFileSync(
+			authPath,
+			JSON.stringify({
+				"https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+					key: "stale-token",
+					expires_at: new Date(Date.now() + expiresInMs).toISOString(),
+				},
+			}),
+		);
+		// Stands in for `grok models`: touches a marker so the test can see it
+		// ran, then rewrites auth.json the way the real CLI does.
+		const stub = join(dir, "grok-stub.sh");
+		writeFileSync(
+			stub,
+			`#!/bin/sh\ntouch "${ranMarker}"\ncat > "${authPath}" <<'EOF'\n${JSON.stringify(
+				{
+					"https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+						key: "refreshed-token",
+						expires_at: new Date(Date.now() + 6 * 60 * MIN).toISOString(),
+					},
+				},
+			)}\nEOF\n`,
+		);
+		chmodSync(stub, 0o755);
+		const prevHome = process.env["GROK_HOME"];
+		const prevBin = process.env["GROK_BIN"];
+		process.env["GROK_HOME"] = dir;
+		process.env["GROK_BIN"] = stub;
+		try {
+			run(dir, ranMarker);
+		} finally {
+			if (prevHome === undefined) delete process.env["GROK_HOME"];
+			else process.env["GROK_HOME"] = prevHome;
+			if (prevBin === undefined) delete process.env["GROK_BIN"];
+			else process.env["GROK_BIN"] = prevBin;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}
+
+	test("refreshes a token that would expire before the container times out", () => {
+		// 45 min of life, 60 min container: valid right now, dead at minute 45.
+		withStubbedGrokHome(45 * MIN, (_dir, ranMarker) => {
+			const token = resolveXaiAccessToken(60 * MIN);
+			expect(existsSync(ranMarker)).toBe(true);
+			expect(token).toBe("refreshed-token");
+		});
+	});
+
+	test("leaves a token alone when it outlives the required window", () => {
+		withStubbedGrokHome(45 * MIN, (_dir, ranMarker) => {
+			const token = resolveXaiAccessToken(30 * MIN);
+			expect(existsSync(ranMarker)).toBe(false);
+			expect(token).toBe("stale-token");
+		});
+	});
+
+	test("uses $GROK_BIN, since the installer leaves grok off a service PATH", () => {
+		withStubbedGrokHome(1 * MIN, (dir, _ranMarker) => {
+			resolveXaiAccessToken(60 * MIN);
+			// Proof the stub ran, not merely that the spawn failed silently.
+			expect(readFileSync(join(dir, "auth.json"), "utf8")).toContain(
+				"refreshed-token",
+			);
+		});
+	});
+
+	test("the provider asks for at least a full container lifetime", () => {
+		// The wiring, not the module: config.ts must pass the container bound.
+		withStubbedGrokHome(CONTAINER_TIMEOUT - 5 * MIN, (_dir, ranMarker) => {
+			XAI_PROVIDER.resolveKey?.();
+			expect(existsSync(ranMarker)).toBe(true);
+		});
 	});
 });

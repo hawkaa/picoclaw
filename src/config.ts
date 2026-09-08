@@ -81,7 +81,9 @@ export const OPENROUTER_PROVIDER: ProviderConfig = {
 export const XAI_PROVIDER: ProviderConfig = {
 	baseUrl: "https://api.x.ai",
 	apiKeyEnvVar: "XAI_API_KEY",
-	resolveKey: resolveXaiAccessToken,
+	// The token is minted once, at spawn, and never re-read — so it has to
+	// outlive the longest a container can run. CONTAINER_TIMEOUT is that bound.
+	resolveKey: () => resolveXaiAccessToken(CONTAINER_TIMEOUT),
 	authStyle: "auth-token",
 };
 
