@@ -32,16 +32,21 @@ import { join } from "node:path";
 /** xAI's production OAuth issuer; auth.json keys are `{issuer}::{client_id}`. */
 const XAI_ISSUER = "https://auth.x.ai";
 
-/**
- * Refresh when the token has less than this left. The CLI mints ~6h tokens, and
- * a container can outlive its own start, so refresh early rather than mid-run.
- */
-const REFRESH_MARGIN_MS = 30 * 60 * 1000; // 30 min
-
 /** `$GROK_HOME` (verbatim when non-empty) else `~/.grok`, matching the CLI. */
 export function grokHome(): string {
 	const override = process.env["GROK_HOME"];
 	return override && override.length > 0 ? override : join(homedir(), ".grok");
+}
+
+/**
+ * The `grok` binary. xAI's installer drops it in `~/.grok/downloads/` and only
+ * links it onto an *interactive* PATH, so a service-managed host (systemd's
+ * minimal PATH) can have a perfectly good login and still fail to refresh it.
+ * `$GROK_BIN` is the escape hatch; bare `grok` stays the default.
+ */
+function grokBin(): string {
+	const override = process.env["GROK_BIN"];
+	return override && override.length > 0 ? override : "grok";
 }
 
 export function xaiAuthPath(): string {
@@ -97,10 +102,14 @@ function readCredential(): XaiCredential | null {
 	}
 }
 
-function isFresh(cred: XaiCredential, now: number): boolean {
+function isFresh(
+	cred: XaiCredential,
+	now: number,
+	minLifetimeMs: number,
+): boolean {
 	// No expiry recorded: trust it rather than hammering the CLI every call.
 	if (cred.expiresAt === null) return true;
-	return cred.expiresAt - now > REFRESH_MARGIN_MS;
+	return cred.expiresAt - now > minLifetimeMs;
 }
 
 /**
@@ -113,7 +122,7 @@ function isFresh(cred: XaiCredential, now: number): boolean {
  */
 function refreshViaOfficialCli(): void {
 	try {
-		spawnSync("grok", ["models"], {
+		spawnSync(grokBin(), ["models"], {
 			timeout: 60_000,
 			stdio: "ignore",
 			env: process.env,
@@ -126,10 +135,19 @@ function refreshViaOfficialCli(): void {
 /**
  * A fresh xAI access token, or null when the host has no `grok` login.
  * Null is the inert path: the provider then behaves as if unconfigured.
+ *
+ * `minLifetimeMs` is required, not defaulted, because the only safe value is a
+ * property of the CALLER, not of this module: the token is resolved once at
+ * container spawn and then never re-read, so it must outlive the container it
+ * is handed to. A margin shorter than the container's hard timeout hands out a
+ * credential that expires mid-run and 401s a session that had already started.
  */
-export function resolveXaiAccessToken(now: number = Date.now()): string | null {
+export function resolveXaiAccessToken(
+	minLifetimeMs: number,
+	now: number = Date.now(),
+): string | null {
 	const cred = readCredential();
-	if (cred && isFresh(cred, now)) return cred.accessToken;
+	if (cred && isFresh(cred, now, minLifetimeMs)) return cred.accessToken;
 	refreshViaOfficialCli();
 	const after = readCredential();
 	if (!after) return null;
