@@ -24,6 +24,23 @@ A task may also carry a `precondition`: the name of an executable in the host-ow
 **IPC**  
 Agents can send Telegram messages while working, not just at the end. The host injects follow-up messages from Telegram into a running session. Agents write task files to `/ipc/tasks/` and the scheduler picks them up.
 
+**Subscription usage visibility**  
+Containers run with a fresh `~/.claude` that is not logged in, so `claude usage` inside a session can't see how much of the host's subscription it has burned. The host reads its own OAuth credentials, queries the same endpoint the Claude Code `/usage` UI uses (`GET /api/oauth/usage`), and publishes a snapshot to every chat's `/ipc/usage-status.json` — refreshed at most every 15 minutes and on each spawn. Sessions read that file to pace themselves:
+
+```json
+{
+  "ok": true,
+  "probed_at": "2026-07-19T19:30:00.000Z",
+  "five_hour_utilization_pct": 42.3,
+  "weekly_utilization_pct": 15.1,
+  "resets_at": "2026-07-19T21:00:00.000Z",
+  "weekly_resets_at": "2026-07-26T00:00:00.000Z",
+  "error": null
+}
+```
+
+`ok: false` (with `error` set and the pct fields `null`) means the probe couldn't read a fresh value — treat it as "unknown budget", never as 0%. When a spawn/session fails with a rate-limit or usage-exhausted error, the host also appends a line to `/ipc/limit-events.jsonl` (`{ ts, chatId, label, error_class }`, where `error_class` is `rate_limit` or `usage_limit_reached`) so sessions can register and learn from "ran out of limits" events.
+
 **Working memory**  
 Reflections, patterns, and knowledge are stored in a Turso SQLite database (queryable, persistent, agent-writable). Patterns compound between sessions.
 
@@ -37,12 +54,13 @@ Host process (Bun)
 ├── Telegram bot
 ├── Task scheduler  →  preconditions/  →  spawns containers
 ├── IPC watcher     →  injects messages into running sessions
+├── Usage probe     →  publishes subscription usage to each /ipc
 └── Workspace git   →  auto-commits after each session
 
 Container (agent session)
 ├── Claude Agent SDK
 ├── /workspace (persistent volume)
-├── /ipc (messaging)
+├── /ipc (messaging + usage-status.json + limit-events.jsonl)
 └── ~/.claude/ (session transcripts)
 ```
 
