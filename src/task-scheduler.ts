@@ -2,6 +2,7 @@ import { CronExpressionParser } from "cron-parser";
 import pino from "pino";
 
 import { TASK_CHECK_INTERVAL } from "./config.ts";
+import type { PreconditionOutcome } from "./precondition.ts";
 import type {
 	ContainerOutput,
 	EffortLevel,
@@ -28,6 +29,13 @@ export interface SchedulerDeps {
 		},
 	) => Promise<ContainerOutput>;
 	sendMessage: (chatId: number | string, text: string) => Promise<void>;
+	/**
+	 * Decide whether a due task should actually spawn a container. Omitted →
+	 * every due task spawns (pre-precondition behaviour).
+	 */
+	checkPrecondition?:
+		| ((task: ScheduledTask) => Promise<PreconditionOutcome>)
+		| undefined;
 }
 
 /**
@@ -81,6 +89,53 @@ export function mergeTasks(
 		const next_run = update.status === "paused" ? null : computeNextRun(task);
 		return { ...task, next_run, status: update.status };
 	});
+}
+
+/**
+ * Split the due tasks into the ones that get a container and the ones whose
+ * precondition said there is nothing to do.
+ *
+ * A skipped RECURRING task advances its schedule exactly as if it had run —
+ * the schedule is a clock, not a backlog — which is why it still produces a
+ * status update for `mergeTasks`.
+ *
+ * A skipped ONCE task produces no update at all: it stays armed with next_run
+ * in the past, so it fires on the first tick where its condition holds ("run
+ * when the wallet is funded", not "run at 03:00 or never"). The cost is that
+ * its check runs every tick, so checks must stay cheap.
+ */
+export async function partitionByPrecondition(
+	dueTasks: ScheduledTask[],
+	checkPrecondition:
+		| ((task: ScheduledTask) => Promise<PreconditionOutcome>)
+		| undefined,
+): Promise<{
+	runnable: ScheduledTask[];
+	skipUpdates: Map<string, { status: ScheduledTask["status"] }>;
+}> {
+	const runnable: ScheduledTask[] = [];
+	const skipUpdates = new Map<string, { status: ScheduledTask["status"] }>();
+
+	// Checks are short-lived host processes; run them concurrently.
+	const outcomes = await Promise.all(
+		dueTasks.map(async (task) => {
+			if (!task.precondition || !checkPrecondition) return null;
+			return await checkPrecondition(task);
+		}),
+	);
+
+	dueTasks.forEach((task, i) => {
+		const outcome = outcomes[i];
+		if (!outcome || outcome.shouldSpawn) {
+			runnable.push(task);
+			return;
+		}
+		if (task.schedule_type !== "once") {
+			skipUpdates.set(task.id, { status: "active" });
+		}
+	});
+
+	return { runnable, skipUpdates };
 }
 
 /**
@@ -166,8 +221,22 @@ export function startTaskScheduler(deps: SchedulerDeps): void {
 			});
 		};
 
-		// Spawn all due tasks concurrently (bounded by semaphore).
-		await Promise.all(dueTasks.map((task) => runTask(task)));
+		// Precondition gate — the cheapest token in the system is the one a
+		// container never boots to spend. Evaluated on the host, before any
+		// spawn.
+		const { runnable, skipUpdates } = await partitionByPrecondition(
+			dueTasks,
+			deps.checkPrecondition,
+		);
+		for (const [id, update] of skipUpdates) updates.set(id, update);
+
+		if (runnable.length === 0 && updates.size === 0) {
+			setTimeout(check, TASK_CHECK_INTERVAL);
+			return;
+		}
+
+		// Spawn every runnable task concurrently (bounded by semaphore).
+		await Promise.all(runnable.map((task) => runTask(task)));
 
 		// Re-read tasks.json now that all spawns have finished.
 		// This captures any IPC writes that occurred during execution.

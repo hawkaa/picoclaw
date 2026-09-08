@@ -18,11 +18,13 @@ import {
 	ensureSessionsDir,
 	seedWorkspace,
 	spawnContainer,
+	workspaceDirFor,
 	writeCloseSentinel,
 	writeIpcInput,
 	writeTasksSnapshot,
 } from "./container-runner.ts";
 import { startIpcWatcher } from "./ipc.ts";
+import { checkTaskPrecondition } from "./precondition.ts";
 import { startTaskScheduler } from "./task-scheduler.ts";
 import { TelegramClient, type TelegramUpdate } from "./telegram.ts";
 import type {
@@ -984,6 +986,10 @@ async function main(): Promise<void> {
 		writeTasks,
 		spawnEphemeral,
 		sendMessage: dispatchMessage,
+		checkPrecondition: (task) =>
+			checkTaskPrecondition(task, {
+				workspaceDir: workspaceDirFor(task.chatId),
+			}),
 	});
 
 	// Register bots with audit client (logs which key each bot uses)

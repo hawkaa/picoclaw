@@ -1,0 +1,48 @@
+#!/usr/bin/env bun
+/**
+ * heartbeat-stale <path> <max-age-seconds>
+ *
+ * "Has it been too long since something happened?"
+ *
+ *   exit 0   — the file is missing, unreadable, or older than max-age → SPAWN
+ *   exit 1   — the file was touched within max-age → skip
+ *   exit 255 — bad arguments (fail open: the scheduler spawns anyway)
+ *
+ * <path> is resolved inside the task's own workspace when relative, so
+ * `heartbeat-stale tmp/idle-sweep 21600` means /workspace/tmp/idle-sweep as
+ * the agent sees it.
+ *
+ * Use it as the second arm of an OR: "spawn when there is queued work, and
+ * in any case at least every six hours". Missing file → spawn is deliberate:
+ * a heartbeat nobody has written yet must not suppress the first run.
+ */
+import fs from "node:fs";
+import path from "node:path";
+
+const [target, maxAgeRaw] = process.argv.slice(2);
+const maxAgeSeconds = Number(maxAgeRaw);
+
+if (!target || !Number.isFinite(maxAgeSeconds) || maxAgeSeconds < 0) {
+	console.error("usage: heartbeat-stale <path> <max-age-seconds>");
+	process.exit(255);
+}
+
+const workspace = process.env["PICOCLAW_WORKSPACE_DIR"] ?? "";
+const file = path.isAbsolute(target)
+	? target
+	: path.join(workspace, target.replace(/^\/workspace\/?/, ""));
+
+let ageSeconds: number;
+try {
+	ageSeconds = (Date.now() - fs.statSync(file).mtimeMs) / 1000;
+} catch {
+	console.error(`${file}: absent → stale`);
+	process.exit(0);
+}
+
+if (ageSeconds > maxAgeSeconds) {
+	console.error(`${file}: ${ageSeconds.toFixed(1)}s old > ${maxAgeSeconds}s`);
+	process.exit(0);
+}
+console.error(`${file}: ${ageSeconds.toFixed(1)}s old <= ${maxAgeSeconds}s`);
+process.exit(1);

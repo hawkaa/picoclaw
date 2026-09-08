@@ -9,9 +9,37 @@ import {
 	parseEffortLevel,
 	WORKSPACES_DIR,
 } from "./config.ts";
+import { normalizePreconditions, parsePrecondition } from "./precondition.ts";
 import type { EffortLevel, ScheduledTask, SessionProfile } from "./types.ts";
 
 const log = pino({ name: "ipc" });
+
+/**
+ * Validate + collapse an incoming `precondition` value.
+ *
+ * Returns `undefined` for "no precondition" — which is also what an empty
+ * string or an empty array means, so a task can clear its gate over IPC.
+ *
+ * A malformed check name is dropped (with a warning) rather than stored: an
+ * unusable gate must degrade to "always spawn", never to "never spawn".
+ * Silent starvation is the one failure mode this feature must not have.
+ */
+export function coercePrecondition(
+	value: string | string[] | undefined,
+): string | string[] | undefined {
+	const specs = normalizePreconditions(value);
+	if (specs.length === 0) return undefined;
+	for (const spec of specs) {
+		if (parsePrecondition(spec) === null) {
+			log.warn(
+				{ spec },
+				"Ignoring precondition — not a legal check name (task will always spawn)",
+			);
+			return undefined;
+		}
+	}
+	return specs.length === 1 ? specs[0] : specs;
+}
 
 export interface IpcDeps {
 	getAllowedChatId: () => string;
@@ -191,6 +219,7 @@ export function processTaskIpc(
 		model?: string;
 		effort?: string;
 		profile?: SessionProfile;
+		precondition?: string | string[];
 	},
 	sourceChatId: string,
 	deps: IpcDeps,
@@ -204,6 +233,7 @@ export function processTaskIpc(
 	const effort: EffortLevel | undefined = data.effort
 		? (parseEffortLevel(data.effort) ?? undefined)
 		: undefined;
+	const precondition = coercePrecondition(data.precondition);
 
 	switch (data.type) {
 		case "schedule": {
@@ -231,6 +261,8 @@ export function processTaskIpc(
 						existing.model = data.model || undefined;
 					if (effort !== undefined) existing.effort = effort;
 					if (data.profile !== undefined) existing.profile = data.profile;
+					if (data.precondition !== undefined)
+						existing.precondition = precondition;
 					deps.writeTasks(tasks);
 					deps.writeSnapshot(
 						chatId,
@@ -257,6 +289,7 @@ export function processTaskIpc(
 				...(data.model ? { model: data.model } : {}),
 				...(effort ? { effort } : {}),
 				...(data.profile ? { profile: data.profile } : {}),
+				...(precondition ? { precondition } : {}),
 			};
 			tasks.push(task);
 			deps.writeTasks(tasks);
@@ -284,6 +317,8 @@ export function processTaskIpc(
 			if (data.model !== undefined) task.model = data.model || undefined;
 			if (effort !== undefined) task.effort = effort;
 			if (data.profile !== undefined) task.profile = data.profile;
+			// `"precondition": ""` clears the gate — the task spawns unconditionally.
+			if (data.precondition !== undefined) task.precondition = precondition;
 			if (data.schedule_type && data.schedule_value) {
 				const nextRun = computeNextRun(data.schedule_type, data.schedule_value);
 				if (nextRun !== null) {

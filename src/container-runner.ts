@@ -546,6 +546,15 @@ export function writeCloseSentinel(
 }
 
 /**
+ * Absolute host path of the workspace mounted at /workspace inside a chat's
+ * containers. Handed to host-side precondition checks so they can read the
+ * same config the agent sees.
+ */
+export function workspaceDirFor(chatId: string): string {
+	return path.join(chatDir(chatId), "workspace");
+}
+
+/**
  * Write tasks snapshot for the container to read.
  */
 export function writeTasksSnapshot(

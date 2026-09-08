@@ -11,12 +11,17 @@ export const WORKSPACES_DIR = path.join(PROJECT_ROOT, "workspaces");
 export const DATA_DIR = path.join(PROJECT_ROOT, "data");
 export const CONTAINER_DIR = path.join(PROJECT_ROOT, "container");
 export const SEEDS_DIR = path.join(CONTAINER_DIR, "seeds");
+/** Host-owned executables a scheduled task may name as its `precondition`. */
+export const PRECONDITIONS_DIR = path.join(PROJECT_ROOT, "preconditions");
 
 export const CONTAINER_BASE_IMAGE = "picoclaw-base:latest";
 export const CONTAINER_TIMEOUT = 60 * 60 * 1000; // 60 min hard timeout
 export const IDLE_TIMEOUT = 60 * 60 * 1000; // 60 min idle → close
 export const IPC_POLL_INTERVAL = 1000; // 1s
 export const TASK_CHECK_INTERVAL = 60 * 1000; // 60s
+// A precondition runs on the host, in front of a container that costs ~30K
+// tokens to boot. It must be cheap; this bound is a backstop, not a budget.
+export const PRECONDITION_TIMEOUT = 30 * 1000; // 30s
 export const TELEGRAM_POLL_TIMEOUT = 30; // seconds
 
 /**
