@@ -50,6 +50,13 @@ export interface ProviderConfig {
 	 *   must be explicitly empty (OpenRouter style)
 	 */
 	authStyle: "api-key" | "auth-token";
+	/**
+	 * Set when the endpoint validates request bodies more strictly than
+	 * Anthropic does, so what Claude Code emits has to be normalized before it
+	 * will be accepted. Surfaced to the container as PICOCLAW_COMPAT, which
+	 * turns on the loopback shim in container/agent-runner/src/compat-shim.ts.
+	 */
+	compat?: "strict-anthropic" | undefined;
 }
 
 export interface ModelTarget {
@@ -85,6 +92,20 @@ export const XAI_PROVIDER: ProviderConfig = {
 	// outlive the longest a container can run. CONTAINER_TIMEOUT is that bound.
 	resolveKey: () => resolveXaiAccessToken(CONTAINER_TIMEOUT),
 	authStyle: "auth-token",
+	// xAI rejects two request shapes Claude Code emits verbatim; see
+	// container/agent-runner/src/compat-shim.ts for both, measured.
+	compat: "strict-anthropic",
+};
+
+/**
+ * Real context windows for models Claude Code's own catalog does not know.
+ * Without one the CLI assumes 200K and auto-compacts against that, throwing
+ * away context a 500K model still had. Measured from GET
+ * https://api.x.ai/v1/models (`context_length`), 2026-09-08.
+ */
+export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+	"grok-4.6": 500_000,
+	"grok-4.5": 500_000,
 };
 
 export const MODEL_ALIASES: Record<string, string | ModelTarget> = {

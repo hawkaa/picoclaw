@@ -10,6 +10,7 @@ import {
 	CONTAINER_TIMEOUT,
 	DATA_DIR,
 	IDLE_TIMEOUT,
+	MODEL_CONTEXT_WINDOWS,
 	OUTPUT_END_MARKER,
 	OUTPUT_START_MARKER,
 	type ProviderConfig,
@@ -90,6 +91,7 @@ export function readSecrets(
 			);
 		}
 		secrets["ANTHROPIC_BASE_URL"] = provider.baseUrl;
+		if (provider.compat) secrets["PICOCLAW_COMPAT"] = provider.compat;
 		if (provider.authStyle === "auth-token") {
 			secrets["ANTHROPIC_AUTH_TOKEN"] = providerKey;
 			// OpenRouter's Anthropic skin requires ANTHROPIC_API_KEY to be
@@ -112,6 +114,13 @@ export function readSecrets(
 	}
 	if (modelOverride) {
 		secrets["ANTHROPIC_MODEL"] = modelOverride;
+		// Claude Code assumes a 200K window for any model its catalog does not
+		// know, and auto-compacts against that. Provider models need their real
+		// one or a 500K session is thrown away at 200K.
+		const contextWindow = MODEL_CONTEXT_WINDOWS[modelOverride];
+		if (contextWindow) {
+			secrets["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = String(contextWindow);
+		}
 	}
 	return secrets;
 }
