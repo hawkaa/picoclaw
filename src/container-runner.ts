@@ -77,10 +77,16 @@ export function readSecrets(
 	const envModel = process.env["ANTHROPIC_MODEL"];
 	if (envModel) secrets["ANTHROPIC_MODEL"] = envModel;
 	if (provider) {
-		const providerKey = process.env[provider.apiKeyEnvVar];
+		// A provider may mint its credential instead of reading a host env var
+		// (xAI: a short-lived OAuth token the official `grok` CLI keeps fresh).
+		// The env var stays the documented fallback for both shapes.
+		const providerKey =
+			provider.resolveKey?.() ?? process.env[provider.apiKeyEnvVar];
 		if (!providerKey) {
 			throw new Error(
-				`Model routes to ${provider.baseUrl} but ${provider.apiKeyEnvVar} is not set in the host environment`,
+				provider.resolveKey
+					? `Model routes to ${provider.baseUrl} but no credential is available — run \`grok login --device-auth\` on the host, or set ${provider.apiKeyEnvVar}`
+					: `Model routes to ${provider.baseUrl} but ${provider.apiKeyEnvVar} is not set in the host environment`,
 			);
 		}
 		secrets["ANTHROPIC_BASE_URL"] = provider.baseUrl;

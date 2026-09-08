@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { BotConfig, EffortLevel } from "./types.ts";
+import { resolveXaiAccessToken } from "./xai-oauth.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,6 +37,13 @@ export interface ProviderConfig {
 	/** Host env var holding the provider API key (never stored in bots.json). */
 	apiKeyEnvVar: string;
 	/**
+	 * Credential source for providers whose key is not a static env var — e.g. a
+	 * short-lived OAuth token a vendor CLI maintains on disk. When present it
+	 * wins over `apiKeyEnvVar`; null means "not configured on this host", which
+	 * raises the same missing-key error as an unset env var.
+	 */
+	resolveKey?: (() => string | null) | undefined;
+	/**
 	 * How the endpoint authenticates:
 	 * - "api-key": key goes in ANTHROPIC_API_KEY (Moonshot style)
 	 * - "auth-token": key goes in ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY
@@ -60,6 +68,23 @@ export const OPENROUTER_PROVIDER: ProviderConfig = {
 	authStyle: "auth-token",
 };
 
+/**
+ * xAI's Anthropic-compatible Messages API, authenticated with the OAuth token
+ * the official `grok` CLI mints and refreshes on this host (see xai-oauth.ts).
+ * That routes frontier work onto a flat-price Grok subscription instead of
+ * per-token billing. Inert until an operator runs `grok login --device-auth`.
+ *
+ * Measured 2026-09-08: POST https://api.x.ai/v1/messages with
+ * `Authorization: Bearer <oauth>` returns 200 for grok-4.6. The same request
+ * with `x-api-key` returns 400, hence auth-token style.
+ */
+export const XAI_PROVIDER: ProviderConfig = {
+	baseUrl: "https://api.x.ai",
+	apiKeyEnvVar: "XAI_API_KEY",
+	resolveKey: resolveXaiAccessToken,
+	authStyle: "auth-token",
+};
+
 export const MODEL_ALIASES: Record<string, string | ModelTarget> = {
 	fable: "claude-fable-5",
 	opus: "claude-opus-5",
@@ -81,6 +106,12 @@ export const MODEL_ALIASES: Record<string, string | ModelTarget> = {
 	},
 	// Convenience shorthand; the slash form routes via OpenRouter (see below)
 	kimi: "moonshotai/kimi-k3",
+	// Grok on the host's own subscription. These ids carry no slash, so they
+	// need explicit targets — inferProvider would otherwise read them as
+	// Anthropic model names. `x-ai/grok-4.6` still routes via OpenRouter.
+	grok: { model: "grok-4.6", provider: XAI_PROVIDER },
+	"grok-4.6": { model: "grok-4.6", provider: XAI_PROVIDER },
+	"grok-4.5": { model: "grok-4.5", provider: XAI_PROVIDER },
 };
 
 /**
