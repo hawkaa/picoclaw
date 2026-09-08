@@ -1,6 +1,17 @@
 import { describe, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-import { computeNextRun, mergeTasks } from "./task-scheduler.ts";
+import {
+	checkTaskPrecondition,
+	type PreconditionOutcome,
+} from "./precondition.ts";
+import {
+	computeNextRun,
+	mergeTasks,
+	partitionByPrecondition,
+} from "./task-scheduler.ts";
 import type { ScheduledTask } from "./types.ts";
 
 function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
@@ -172,6 +183,24 @@ describe("mergeTasks", () => {
 		);
 	});
 
+	test("skipped recurring task advances next_run without having run", () => {
+		// The whole point of the gate: no container was spawned, yet the cron
+		// moves on to its next slot instead of firing again in 60 seconds.
+		const task = makeTask({
+			schedule_value: "0 * * * *",
+			next_run: "2020-01-01T00:00:00.000Z",
+			precondition: "imap-work --messages=INBOX",
+		});
+		const [merged] = mergeTasks(
+			[task],
+			new Map([[task.id, { status: "active" }]]),
+		);
+		expect(merged?.status).toBe("active");
+		expect(new Date(merged?.next_run ?? "").getTime()).toBeGreaterThan(
+			Date.now(),
+		);
+	});
+
 	test("task in updates but absent from fresh is dropped (IPC deletion)", () => {
 		const t1 = makeTask({ id: "t1" });
 		// updates references a task that no longer exists in `fresh`.
@@ -182,5 +211,111 @@ describe("mergeTasks", () => {
 		const merged = mergeTasks([t1], updates);
 		expect(merged.length).toBe(1);
 		expect(merged[0]?.id).toBe("t1");
+	});
+});
+
+describe("partitionByPrecondition", () => {
+	const spawnOk: PreconditionOutcome = { shouldSpawn: true, reason: "passed" };
+	const skip: PreconditionOutcome = { shouldSpawn: false, reason: "not-met" };
+
+	test("no precondition → runs, and the check is never invoked", async () => {
+		const task = makeTask();
+		let calls = 0;
+		const { runnable, skipUpdates } = await partitionByPrecondition(
+			[task],
+			async () => {
+				calls++;
+				return skip;
+			},
+		);
+		expect(runnable).toEqual([task]);
+		expect(skipUpdates.size).toBe(0);
+		expect(calls).toBe(0);
+	});
+
+	test("precondition met → runs", async () => {
+		const task = makeTask({ precondition: "imap-work --messages=INBOX" });
+		const { runnable, skipUpdates } = await partitionByPrecondition(
+			[task],
+			async () => spawnOk,
+		);
+		expect(runnable).toEqual([task]);
+		expect(skipUpdates.size).toBe(0);
+	});
+
+	test("precondition not met → no spawn, schedule still advances", async () => {
+		const task = makeTask({ precondition: "imap-work --messages=INBOX" });
+		const { runnable, skipUpdates } = await partitionByPrecondition(
+			[task],
+			async () => skip,
+		);
+		expect(runnable).toEqual([]);
+		expect(skipUpdates.get(task.id)).toEqual({ status: "active" });
+	});
+
+	test("skipped 'once' task stays armed — no update, next_run untouched", async () => {
+		// "Deploy when the wallet is funded": a one-shot task whose condition is
+		// not yet true must NOT be consumed by the firing that skipped it.
+		const task = makeTask({
+			schedule_type: "once",
+			next_run: "2020-01-01T00:00:00.000Z",
+			precondition: "wallet-funded",
+		});
+		const { runnable, skipUpdates } = await partitionByPrecondition(
+			[task],
+			async () => skip,
+		);
+		expect(runnable).toEqual([]);
+		expect(skipUpdates.size).toBe(0);
+		// mergeTasks leaves a task it has no update for completely alone.
+		const [merged] = mergeTasks([task], skipUpdates);
+		expect(merged?.next_run).toBe("2020-01-01T00:00:00.000Z");
+		expect(merged?.status).toBe("active");
+	});
+
+	test("mixed batch: only the gated task is held back", async () => {
+		const open = makeTask({ id: "open" });
+		const gated = makeTask({ id: "gated", precondition: "no-work" });
+		const alsoOpen = makeTask({ id: "also-open", precondition: "has-work" });
+		const { runnable, skipUpdates } = await partitionByPrecondition(
+			[open, gated, alsoOpen],
+			async (t) => (t.id === "gated" ? skip : spawnOk),
+		);
+		expect(runnable.map((t) => t.id)).toEqual(["open", "also-open"]);
+		expect([...skipUpdates.keys()]).toEqual(["gated"]);
+	});
+
+	test("no checker wired → preconditions are inert, everything runs", async () => {
+		// Backwards compatibility: a host that never wires checkPrecondition
+		// behaves exactly as it did before this feature existed.
+		const task = makeTask({ precondition: "imap-work" });
+		const { runnable, skipUpdates } = await partitionByPrecondition(
+			[task],
+			undefined,
+		);
+		expect(runnable).toEqual([task]);
+		expect(skipUpdates.size).toBe(0);
+	});
+
+	test("end to end: real checker, real shipped check, no spawn", async () => {
+		// Every case above hands partitionByPrecondition a fake outcome, which
+		// tests the partition and not the wiring. This one runs the function
+		// index.ts actually passes, against a file that actually ships.
+		const hb = path.join(
+			os.tmpdir(),
+			`picoclaw-scheduler-hb-${process.pid}-${Date.now()}`,
+		);
+		fs.writeFileSync(hb, "");
+		try {
+			const task = makeTask({ precondition: `heartbeat-stale ${hb} 3600` });
+			const { runnable, skipUpdates } = await partitionByPrecondition(
+				[task],
+				(t) => checkTaskPrecondition(t),
+			);
+			expect(runnable).toEqual([]);
+			expect(skipUpdates.get(task.id)).toEqual({ status: "active" });
+		} finally {
+			fs.rmSync(hb, { force: true });
+		}
 	});
 });

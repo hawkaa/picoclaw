@@ -1,0 +1,164 @@
+#!/usr/bin/env bun
+/**
+ * imap-work --env=<file> [--messages=INBOX] [--unseen=Archive,Learning]
+ *           [--user-key=K] [--pass-key=K] [--host=H] [--port=N]
+ *
+ * "Is there mail worth booting a triage session for?"
+ *
+ *   exit 0   — at least one folder has work → SPAWN
+ *   exit 1   — every named folder is empty/clean → skip
+ *   exit 255 — could not ask (no creds, login refused, network) → fail open
+ *
+ * Two questions, because triage has two triggers:
+ *   --messages  folder must be EMPTY when triage is done ("inbox at 0"), so
+ *               any message at all is work. Robust against another reader
+ *               having already cleared the \Seen flag.
+ *   --unseen    folder is an archive that mail is filed into directly; only
+ *               something NEW is work.
+ *
+ * Credentials come from a KEY=VALUE file inside the task's own workspace —
+ * the same file the agent reads. This check reads it as DATA (host never
+ * executes anything from the workspace).
+ *
+ * No dependencies: IMAP STATUS over TLS is ~60 lines and this runs on the
+ * host, in front of every spawn.
+ */
+import fs from "node:fs";
+import path from "node:path";
+import tls from "node:tls";
+
+const CONNECT_TIMEOUT_MS = 20_000;
+
+function flag(name: string): string | undefined {
+	const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
+	return hit ? hit.slice(name.length + 3) : undefined;
+}
+
+function fail(msg: string): never {
+	console.error(msg);
+	process.exit(255);
+}
+
+const envFlag = flag("env");
+if (!envFlag) fail("usage: imap-work --env=<file> [--messages=..] [--unseen=..]");
+
+const workspace = process.env["PICOCLAW_WORKSPACE_DIR"] ?? "";
+const envPath = path.isAbsolute(envFlag)
+	? envFlag
+	: path.join(workspace, envFlag.replace(/^\/workspace\/?/, ""));
+
+let envText: string;
+try {
+	envText = fs.readFileSync(envPath, "utf-8");
+} catch (err) {
+	fail(`cannot read ${envPath}: ${(err as Error).message}`);
+}
+
+const creds: Record<string, string> = {};
+for (const line of envText.split("\n")) {
+	const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+	if (m?.[1]) creds[m[1]] = (m[2] ?? "").trim().replace(/^["']|["']$/g, "");
+}
+
+const userKey = flag("user-key");
+const passKey = flag("pass-key");
+const user = userKey
+	? creds[userKey]
+	: (creds["IMAP_USER"] ?? creds["EMAIL_ADDRESS"]);
+const pass = passKey
+	? creds[passKey]
+	: (creds["IMAP_PASSWORD"] ?? creds["EMAIL_PASSWORD"]);
+if (!user || !pass) fail(`no usable credentials in ${envPath}`);
+
+const host = flag("host") ?? creds["IMAP_HOST"] ?? "imap.migadu.com";
+const port = Number(flag("port") ?? creds["IMAP_PORT"] ?? 993);
+
+const list = (v: string | undefined) =>
+	(v ?? "")
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+const messageFolders = list(flag("messages"));
+const unseenFolders = list(flag("unseen"));
+if (messageFolders.length === 0 && unseenFolders.length === 0) {
+	fail("nothing to check: pass --messages= and/or --unseen=");
+}
+
+/** IMAP quoted string: only \ and " need escaping. */
+const q = (s: string) => `"${s.replace(/([\\"])/g, "\\$1")}"`;
+
+const socket = tls.connect({ host, port, servername: host });
+socket.setEncoding("utf-8");
+socket.setTimeout(CONNECT_TIMEOUT_MS);
+
+let buffer = "";
+let tag = 0;
+const waiters: Array<{ tag: string; resolve: (lines: string[]) => void }> = [];
+const collected: string[] = [];
+
+socket.on("data", (chunk: string) => {
+	buffer += chunk;
+	let idx: number;
+	// biome-ignore lint/suspicious/noAssignInExpressions: line-splitting loop
+	while ((idx = buffer.indexOf("\r\n")) !== -1) {
+		const line = buffer.slice(0, idx);
+		buffer = buffer.slice(idx + 2);
+		collected.push(line);
+		const w = waiters[0];
+		if (w && line.startsWith(`${w.tag} `)) {
+			waiters.shift();
+			w.resolve(collected.splice(0, collected.length));
+		}
+	}
+});
+socket.on("timeout", () => fail(`${host}:${port}: timed out`));
+socket.on("error", (err) => fail(`${host}:${port}: ${err.message}`));
+
+function send(command: string): Promise<string[]> {
+	const t = `a${++tag}`;
+	return new Promise((resolve) => {
+		waiters.push({ tag: t, resolve });
+		socket.write(`${t} ${command}\r\n`);
+	});
+}
+
+await new Promise<void>((resolve) => socket.once("secureConnect", resolve));
+// Greeting arrives untagged; give it a moment to land before LOGIN.
+await new Promise((r) => setTimeout(r, 50));
+
+const loginLines = await send(`LOGIN ${q(user)} ${q(pass)}`);
+if (!loginLines.some((l) => /^a\d+ OK/i.test(l))) {
+	fail(`login failed for ${user}: ${loginLines.at(-1) ?? "no response"}`);
+}
+
+async function count(folder: string, item: "MESSAGES" | "UNSEEN") {
+	const lines = await send(`STATUS ${q(folder)} (${item})`);
+	if (!lines.some((l) => /^a\d+ OK/i.test(l))) {
+		fail(`STATUS ${folder} (${item}) failed: ${lines.at(-1) ?? "no response"}`);
+	}
+	for (const line of lines) {
+		if (!line.startsWith("*")) continue;
+		const m = line.match(new RegExp(`\\b${item}\\s+(\\d+)`, "i"));
+		if (m?.[1]) return Number(m[1]);
+	}
+	fail(`STATUS ${folder} (${item}): no count in response`);
+}
+
+const report: string[] = [];
+let work = 0;
+for (const folder of messageFolders) {
+	const n = await count(folder, "MESSAGES");
+	report.push(`${folder}:${n} msg`);
+	work += n;
+}
+for (const folder of unseenFolders) {
+	const n = await count(folder, "UNSEEN");
+	report.push(`${folder}:${n} unseen`);
+	work += n;
+}
+
+await send("LOGOUT");
+socket.end();
+
+console.error(`${user} ${report.join(" ")} → ${work > 0 ? "work" : "idle"}`);
+process.exit(work > 0 ? 0 : 1);

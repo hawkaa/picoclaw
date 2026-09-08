@@ -1,10 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { OPENROUTER_PROVIDER, type ProviderConfig } from "./config.ts";
-import {
-	PROVIDER_THINKING_BUDGETS,
-	readSecrets,
-} from "./container-runner.ts";
+import { PROVIDER_THINKING_BUDGETS, readSecrets } from "./container-runner.ts";
 import type { EffortLevel } from "./types.ts";
 
 /**
@@ -80,7 +77,12 @@ describe("readSecrets effort → MAX_THINKING_TOKENS", () => {
 	});
 
 	test("effort without a provider never leaks MAX_THINKING_TOKENS (Claude keeps adaptive effort)", () => {
-		const secrets = readSecrets("sk-ant-plain-key", undefined, undefined, "high");
+		const secrets = readSecrets(
+			"sk-ant-plain-key",
+			undefined,
+			undefined,
+			"high",
+		);
 
 		expect(secrets).not.toHaveProperty("MAX_THINKING_TOKENS");
 	});

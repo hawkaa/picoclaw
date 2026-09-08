@@ -19,6 +19,8 @@ Each session runs in a fresh container with its own filesystem and PID namespace
 **Scheduler**  
 The host process checks every 60 seconds and spawns containers on cron, interval, or one-time schedules. Agents can register their own future tasks. Self-scheduling is what separates autonomous from interactive.
 
+A task may also carry a `precondition`: the name of an executable in the host-owned `preconditions/` directory, run before the spawn. Exit 0 spawns, 1–254 skips silently, anything else spawns anyway. A recurring session that boots only to find an empty inbox pays its full context cost before it can discover that; the check answers the same question for the price of a process. It names a vetted check, never a shell command — tasks arrive from inside containers, and the isolation boundary only holds if the container chooses *which* question is asked, never what code answers it.
+
 **IPC**  
 Agents can send Telegram messages while working, not just at the end. The host injects follow-up messages from Telegram into a running session. Agents write task files to `/ipc/tasks/` and the scheduler picks them up.
 
@@ -33,7 +35,7 @@ Each session is issued an EdDSA JWT (`$AGENTLAIR_AAT`) with a 1-hour TTL, verifi
 ```
 Host process (Bun)
 ├── Telegram bot
-├── Task scheduler  →  spawns containers
+├── Task scheduler  →  preconditions/  →  spawns containers
 ├── IPC watcher     →  injects messages into running sessions
 └── Workspace git   →  auto-commits after each session
 

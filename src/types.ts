@@ -78,6 +78,19 @@ export interface ScheduledTask {
 	model?: string | undefined;
 	effort?: EffortLevel | undefined;
 	profile?: SessionProfile | undefined;
+	/**
+	 * Name (+ argv) of a host-side check, run BEFORE the container is spawned:
+	 * `"imap-work --messages=INBOX"`. Exit 0 → spawn; exit 1..254 → skip this
+	 * firing without paying the boot cost; anything else → spawn anyway.
+	 *
+	 * An array is OR-ed — spawn if any check says there is work.
+	 *
+	 * The string names an executable in the host's `preconditions/` directory.
+	 * It is NOT a shell command: tasks arrive over IPC from inside a container,
+	 * and the container boundary is the point of this project. See
+	 * `src/precondition.ts`.
+	 */
+	precondition?: string | string[] | undefined;
 }
 
 export interface SessionData {
