@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import { OPENROUTER_PROVIDER, type ProviderConfig } from "./config.ts";
+import {
+	MODEL_CONTEXT_WINDOWS,
+	OPENROUTER_PROVIDER,
+	type ProviderConfig,
+} from "./config.ts";
 import { PROVIDER_THINKING_BUDGETS, readSecrets } from "./container-runner.ts";
 import type { EffortLevel } from "./types.ts";
 
@@ -122,5 +126,44 @@ describe("readSecrets provider auth styles", () => {
 		expect(() =>
 			readSecrets("sk-ant-unused", "vendor/model", OPENROUTER_PROVIDER, "low"),
 		).toThrow(OPENROUTER_PROVIDER.apiKeyEnvVar);
+	});
+});
+
+describe("readSecrets compat + context-window signalling", () => {
+	const COMPAT_PROVIDER: ProviderConfig = {
+		...API_KEY_PROVIDER,
+		compat: "strict-anthropic",
+	};
+
+	test("a compat provider turns the container's loopback shim on", () => {
+		process.env[COMPAT_PROVIDER.apiKeyEnvVar] = "provider-secret";
+
+		const secrets = readSecrets("sk-ant-unused", "grok-4.6", COMPAT_PROVIDER);
+
+		expect(secrets["PICOCLAW_COMPAT"]).toBe("strict-anthropic");
+	});
+
+	test("a provider without compat leaves it off", () => {
+		process.env[API_KEY_PROVIDER.apiKeyEnvVar] = "provider-secret";
+
+		const secrets = readSecrets("sk-ant-unused", "grok-4.6", API_KEY_PROVIDER);
+
+		expect(secrets).not.toHaveProperty("PICOCLAW_COMPAT");
+	});
+
+	test("a model with a known window overrides the CLI's 200K assumption", () => {
+		process.env[API_KEY_PROVIDER.apiKeyEnvVar] = "provider-secret";
+
+		const secrets = readSecrets("sk-ant-unused", "grok-4.6", API_KEY_PROVIDER);
+
+		expect(secrets["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]).toBe(
+			String(MODEL_CONTEXT_WINDOWS["grok-4.6"]),
+		);
+	});
+
+	test("a model the table does not know is left to the CLI's own catalog", () => {
+		const secrets = readSecrets("sk-ant-key", "claude-opus-5");
+
+		expect(secrets).not.toHaveProperty("CLAUDE_CODE_MAX_CONTEXT_TOKENS");
 	});
 });

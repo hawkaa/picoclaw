@@ -16,6 +16,7 @@ import {
 	type SDKUserMessage,
 	type SettingSource,
 } from "@anthropic-ai/claude-agent-sdk";
+import { applyCompatShim } from "./compat-shim.ts";
 
 interface ImageAttachment {
 	data: string;
@@ -447,6 +448,11 @@ async function main(): Promise<void> {
 	if (containerInput.effort) {
 		sdkEnv["PICOCLAW_EFFORT"] = containerInput.effort;
 	}
+
+	// Some Anthropic-compatible endpoints reject request shapes Claude Code
+	// emits. A provider that needs them normalized sets PICOCLAW_COMPAT; this
+	// then routes the SDK through a loopback proxy. See compat-shim.ts.
+	applyCompatShim(sdkEnv);
 
 	// Session profile: persona + env overrides (applied last so they win over secrets/process.env).
 	const profile = containerInput.profile;
