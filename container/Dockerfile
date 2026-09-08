@@ -17,7 +17,11 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 #
 # The SDK (claude-agent-sdk) detects native binaries by extension — any path
 # not ending in .js/.mjs/.ts/.tsx/.jsx is exec'd directly, no node/bun wrapper.
-ARG CLAUDE_CODE_VERSION=2.1.126
+#
+# FLOOR: models released after 2026-08 are refused by the API with
+# error_code "claude_code_version_too_old" unless the CLI is >= 2.1.251.
+# Do not pin below that — it silently locks the whole fleet out of new models.
+ARG CLAUDE_CODE_VERSION=2.1.258
 RUN ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && \
     (bun install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} || true) && \
     SRC=/root/.bun/install/global/node_modules/@anthropic-ai/claude-code-linux-${ARCH}/claude && \
