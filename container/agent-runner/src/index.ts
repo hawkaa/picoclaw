@@ -55,7 +55,8 @@ interface ContainerOutput {
 	result: string | null;
 	newSessionId?: string | undefined;
 	error?: string | undefined;
-	type?: "text" | "result" | undefined;
+	type?: "text" | "result" | "tool_use" | undefined;
+	toolName?: string | undefined;
 }
 
 interface UserContent {
@@ -326,6 +327,14 @@ async function runPrompt(
 			log(`Assistant text: ${text.slice(0, 300)}`);
 			writeOutput({ status: "success", result: text, type: "text" });
 		}
+		if (event.type === "tool_execution_start") {
+			writeOutput({
+				status: "success",
+				result: null,
+				type: "tool_use",
+				toolName: event.toolName,
+			});
+		}
 		const err = assistantError(event);
 		if (err !== null) error = err;
 	});
@@ -509,11 +518,9 @@ async function main(): Promise<void> {
 			log(`Extension error ${e.path}: ${e.error}`);
 		}
 		log(`Session ${priorFile ? "resumed" : "created"}: ${session.sessionId}`);
-		writeOutput({
-			status: "success",
-			result: null,
-			newSessionId: session.sessionId,
-		});
+		// Do not writeOutput here: a typeless packet makes the host treat the
+		// turn as finished and kills the Telegram typing indicator. Session id
+		// is attached to the type:result packet at the end of the first run.
 
 		let promptText = containerInput.prompt;
 		if (containerInput.isScheduledTask) {
