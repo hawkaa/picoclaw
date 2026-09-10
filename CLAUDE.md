@@ -1,6 +1,6 @@
 # PicoClaw
 
-Telegram bot that runs Claude AI agents inside isolated Docker containers with persistent workspaces and task scheduling.
+Telegram bot that runs AI agents (pi coding agent) inside isolated Docker containers with persistent workspaces and task scheduling.
 
 ## Tooling
 
@@ -29,5 +29,5 @@ Strict tsconfig with these notable settings:
 ## Project structure
 
 - `src/` — host process: Telegram bot, container lifecycle, IPC, task scheduling
-- `container/agent-runner/` — runs inside Docker, uses Claude Agent SDK
+- `container/agent-runner/` — runs inside Docker, uses `@earendil-works/pi-coding-agent`
 - Two separate `package.json` and `tsconfig.json` (root + agent-runner)

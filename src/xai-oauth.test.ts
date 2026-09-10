@@ -15,8 +15,16 @@ import {
 	resolveModelTarget,
 	XAI_PROVIDER,
 } from "./config.ts";
-import { readSecrets } from "./container-runner.ts";
-import { parseXaiAuth, resolveXaiAccessToken } from "./xai-oauth.ts";
+import {
+	API_KEY_SECRET,
+	MODEL_SECRET,
+	readSecrets,
+} from "./container-runner.ts";
+import {
+	parseOmpXaiCredential,
+	parseXaiAuth,
+	resolveXaiAccessToken,
+} from "./xai-oauth.ts";
 
 /**
  * Grok on a flat-price subscription instead of per-token billing. The
@@ -76,14 +84,38 @@ describe("parseXaiAuth", () => {
 	});
 });
 
+describe("parseOmpXaiCredential", () => {
+	test("reads access + epoch-ms expiry from omp's sqlite blob", () => {
+		const parsed = parseOmpXaiCredential(
+			JSON.stringify({
+				access: "header.payload.signature",
+				refresh: "opaque",
+				expires: 1789038477920,
+				accountId: "bc8bd46f",
+				email: "hakon@aamdal.com",
+			}),
+		);
+		expect(parsed?.accessToken).toBe("header.payload.signature");
+		expect(parsed?.expiresAt).toBe(1789038477920);
+	});
+
+	test("returns null on malformed JSON rather than throwing", () => {
+		expect(parseOmpXaiCredential("{not json")).toBeNull();
+	});
+
+	test("rejects a token containing control characters", () => {
+		expect(
+			parseOmpXaiCredential(JSON.stringify({ access: "abc\ndef", expires: 1 })),
+		).toBeNull();
+	});
+});
+
 describe("xAI model routing", () => {
 	test("bare grok aliases route to xAI, not to Anthropic", () => {
 		// These ids carry no slash, so without an explicit target inferProvider
 		// would silently treat them as Anthropic model names.
 		for (const alias of ["grok", "grok-4.6", "grok-4.5"]) {
-			expect(resolveModelTarget(alias).provider?.baseUrl).toBe(
-				"https://api.x.ai",
-			);
+			expect(resolveModelTarget(alias).provider?.id).toBe("xai");
 		}
 	});
 
@@ -94,9 +126,7 @@ describe("xAI model routing", () => {
 	test("the slash form still routes via OpenRouter", () => {
 		// Regression: adding first-party xAI must not capture the generic
 		// vendor/model path that already worked.
-		expect(resolveModelTarget("x-ai/grok-4.6").provider?.baseUrl).toBe(
-			"https://openrouter.ai/api",
-		);
+		expect(resolveModelTarget("x-ai/grok-4.6").provider?.id).toBe("openrouter");
 	});
 });
 
@@ -106,17 +136,14 @@ describe("readSecrets with a credential-minting provider", () => {
 		resolveKey,
 	});
 
-	test("uses the minted token as a bearer and blanks ANTHROPIC_API_KEY", () => {
+	test("hands the minted token to the runner as the xai credential", () => {
 		const secrets = readSecrets(
 			"sk-ant-unused",
 			"grok-4.6",
 			withResolver(() => "minted-token"),
-			undefined,
 		);
-		expect(secrets["ANTHROPIC_BASE_URL"]).toBe("https://api.x.ai");
-		expect(secrets["ANTHROPIC_AUTH_TOKEN"]).toBe("minted-token");
-		// xAI answered 400 to x-api-key, so the SDK must not fall back to it.
-		expect(secrets["ANTHROPIC_API_KEY"]).toBe("");
+		expect(secrets[MODEL_SECRET]).toBe("xai/grok-4.6");
+		expect(secrets[API_KEY_SECRET]).toBe("minted-token");
 	});
 
 	test("falls back to the env var when no token is on disk", () => {
@@ -126,9 +153,8 @@ describe("readSecrets with a credential-minting provider", () => {
 				"sk-ant-unused",
 				"grok-4.6",
 				withResolver(() => null),
-				undefined,
 			);
-			expect(secrets["ANTHROPIC_AUTH_TOKEN"]).toBe("env-fallback-key");
+			expect(secrets[API_KEY_SECRET]).toBe("env-fallback-key");
 		} finally {
 			delete process.env["XAI_API_KEY"];
 		}
@@ -143,7 +169,6 @@ describe("readSecrets with a credential-minting provider", () => {
 				"sk-ant-unused",
 				"grok-4.6",
 				withResolver(() => null),
-				undefined,
 			),
 		).toThrow(/grok login --device-auth/);
 	});
@@ -193,8 +218,11 @@ describe("resolveXaiAccessToken lifetime margin", () => {
 		chmodSync(stub, 0o755);
 		const prevHome = process.env["GROK_HOME"];
 		const prevBin = process.env["GROK_BIN"];
+		const prevOmp = process.env["OMP_AGENT_DIR"];
 		process.env["GROK_HOME"] = dir;
 		process.env["GROK_BIN"] = stub;
+		// Don't let a live omp login on the test host short-circuit the CLI path.
+		process.env["OMP_AGENT_DIR"] = join(dir, "no-omp");
 		try {
 			run(dir, ranMarker);
 		} finally {
@@ -202,6 +230,8 @@ describe("resolveXaiAccessToken lifetime margin", () => {
 			else process.env["GROK_HOME"] = prevHome;
 			if (prevBin === undefined) delete process.env["GROK_BIN"];
 			else process.env["GROK_BIN"] = prevBin;
+			if (prevOmp === undefined) delete process.env["OMP_AGENT_DIR"];
+			else process.env["OMP_AGENT_DIR"] = prevOmp;
 			rmSync(dir, { recursive: true, force: true });
 		}
 	}

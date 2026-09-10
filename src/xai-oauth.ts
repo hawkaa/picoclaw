@@ -1,35 +1,20 @@
 /**
- * xAI (Grok) auth backed by a *subscription* instead of per-token billing.
+ * xAI (Grok) auth: reuse the SuperGrok OAuth token this host's omp install
+ * already maintains (`~/.omp/agent/agent.db`, provider `xai-oauth`).
  *
- * Why this exists: frontier calls are the single largest variable cost in the
- * fleet. A SuperGrok subscription is flat-price, and xAI serves an
- * Anthropic-compatible Messages API at https://api.x.ai/v1/messages — the same
- * shape PicoClaw already speaks to OpenRouter and Moonshot. So the subscription
- * can carry frontier work through the existing ProviderConfig seam, unchanged.
- *
- * CREDENTIAL OWNERSHIP — the important part.
- * xAI ships an official device-code OAuth flow inside its own `grok` CLI,
- * documented for exactly this case ("headless or remote environments"). The
- * access token is minted AND refreshed by that binary, under xAI's own
- * client_id. PicoClaw never runs an OAuth flow, never presents a client_id it
- * was not issued, and never touches the refresh_token itself: when the token is
- * near expiry it *invokes the official binary* and re-reads what that binary
- * wrote. We are a reader of a credential xAI's own client maintains.
- *
- * Operator setup (once, on the host):
- *   curl -fsSL https://x.ai/cli/install.sh | bash
- *   grok login --device-auth      # approve on any browser; account holder only
- *
- * Absent that file this module returns null and the provider is inert, so
- * merging this changes nothing until an operator opts in by logging in.
+ * Same account, same client, same bearer this omp session is using right now.
+ * PicoClaw never runs an OAuth flow and never touches the refresh token —
+ * omp owns refresh. Fallback: the official `grok` CLI's auth.json, for hosts
+ * that logged in with `grok login` but not omp.
  */
 
+import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-/** xAI's production OAuth issuer; auth.json keys are `{issuer}::{client_id}`. */
+/** xAI's production OAuth issuer; grok CLI auth.json keys are `{issuer}::{client_id}`. */
 const XAI_ISSUER = "https://auth.x.ai";
 
 /** `$GROK_HOME` (verbatim when non-empty) else `~/.grok`, matching the CLI. */
@@ -53,10 +38,30 @@ export function xaiAuthPath(): string {
 	return join(grokHome(), "auth.json");
 }
 
+export function ompAuthDbPath(): string {
+	const override = process.env["OMP_AGENT_DIR"];
+	const agentDir =
+		override && override.length > 0
+			? override
+			: join(homedir(), ".omp", "agent");
+	return join(agentDir, "agent.db");
+}
+
 export interface XaiCredential {
 	accessToken: string;
 	/** Epoch ms, or null when the file carries no parsable expiry. */
 	expiresAt: number | null;
+}
+
+function asBearer(
+	token: unknown,
+	expiresAt: number | null,
+): XaiCredential | null {
+	if (typeof token !== "string" || token.length === 0) return null;
+	// A bearer must be a single line; a control char would corrupt the header.
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point
+	if (/[\u0000-\u001f\u007f]/.test(token)) return null;
+	return { accessToken: token, expiresAt };
 }
 
 /**
@@ -76,23 +81,61 @@ export function parseXaiAuth(raw: string): XaiCredential | null {
 		if (!scope.startsWith(`${XAI_ISSUER}::`)) continue;
 		if (typeof value !== "object" || value === null) continue;
 		const entry = value as Record<string, unknown>;
-		const key = entry["key"];
-		if (typeof key !== "string" || key.length === 0) continue;
-		// A bearer must be a single line; a control char would corrupt the header.
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point
-		if (/[\u0000-\u001f\u007f]/.test(key)) continue;
 		const rawExpiry = entry["expires_at"];
 		let expiresAt: number | null = null;
 		if (typeof rawExpiry === "string") {
 			const parsed = Date.parse(rawExpiry);
 			if (!Number.isNaN(parsed)) expiresAt = parsed;
 		}
-		return { accessToken: key, expiresAt };
+		const cred = asBearer(entry["key"], expiresAt);
+		if (cred) return cred;
 	}
 	return null;
 }
 
-function readCredential(): XaiCredential | null {
+/**
+ * Parse one `auth_credentials.data` blob from omp's sqlite store
+ * (`provider = xai-oauth`, `credential_type = oauth`).
+ */
+export function parseOmpXaiCredential(raw: string): XaiCredential | null {
+	let doc: unknown;
+	try {
+		doc = JSON.parse(raw);
+	} catch {
+		return null;
+	}
+	if (typeof doc !== "object" || doc === null) return null;
+	const entry = doc as Record<string, unknown>;
+	const rawExpiry = entry["expires"];
+	let expiresAt: number | null = null;
+	if (typeof rawExpiry === "number" && Number.isFinite(rawExpiry)) {
+		expiresAt = rawExpiry;
+	}
+	return asBearer(entry["access"], expiresAt);
+}
+
+function readOmpCredential(): XaiCredential | null {
+	const path = ompAuthDbPath();
+	if (!existsSync(path)) return null;
+	try {
+		const db = new Database(path, { readonly: true });
+		try {
+			const row = db
+				.query(
+					"select data from auth_credentials where provider = 'xai-oauth' and credential_type = 'oauth' limit 1",
+				)
+				.get() as { data: string } | null;
+			if (!row || typeof row.data !== "string") return null;
+			return parseOmpXaiCredential(row.data);
+		} finally {
+			db.close();
+		}
+	} catch {
+		return null;
+	}
+}
+
+function readGrokCliCredential(): XaiCredential | null {
 	const path = xaiAuthPath();
 	if (!existsSync(path)) return null;
 	try {
@@ -133,8 +176,9 @@ function refreshViaOfficialCli(): void {
 }
 
 /**
- * A fresh xAI access token, or null when the host has no `grok` login.
- * Null is the inert path: the provider then behaves as if unconfigured.
+ * A fresh xAI access token, or null when this host has no SuperGrok login.
+ * Prefers omp's live `xai-oauth` credential (omp owns that refresh token).
+ * grok CLI is fallback only.
  *
  * `minLifetimeMs` is required, not defaulted, because the only safe value is a
  * property of the CALLER, not of this module: the token is resolved once at
@@ -146,12 +190,13 @@ export function resolveXaiAccessToken(
 	minLifetimeMs: number,
 	now: number = Date.now(),
 ): string | null {
-	const cred = readCredential();
+	const omp = readOmpCredential();
+	if (omp) return omp.accessToken;
+
+	const cred = readGrokCliCredential();
 	if (cred && isFresh(cred, now, minLifetimeMs)) return cred.accessToken;
 	refreshViaOfficialCli();
-	const after = readCredential();
+	const after = readGrokCliCredential();
 	if (!after) return null;
-	// Return even if still stale: a 401 from xAI is a clearer operator signal
-	// than a silent fallback to per-token billing they did not ask for.
 	return after.accessToken;
 }

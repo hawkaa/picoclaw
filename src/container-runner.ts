@@ -9,6 +9,7 @@ import {
 	CONTAINER_DIR,
 	CONTAINER_TIMEOUT,
 	DATA_DIR,
+	DEFAULT_MODEL,
 	IDLE_TIMEOUT,
 	OUTPUT_END_MARKER,
 	OUTPUT_START_MARKER,
@@ -20,7 +21,6 @@ import {
 import type {
 	ContainerInput,
 	ContainerOutput,
-	EffortLevel,
 	ImageAttachment,
 } from "./types.ts";
 
@@ -50,70 +50,40 @@ function chmodRecursive(dir: string): void {
 	}
 }
 
-/**
- * Non-Anthropic backends don't understand the adaptive-thinking `effort`
- * beta the SDK sends for Claude models — they steer reasoning depth via the
- * Anthropic-protocol `thinking.budget_tokens`, which the Claude CLI derives
- * from MAX_THINKING_TOKENS (env wins over settings). OpenRouter maps that
- * budget onto the model's reasoning config, so `/new kimi high` actually
- * changes Kimi's thinking depth. Budgets are hard caps, not adaptive:
- * a too-low budget can truncate reasoning mid-thought on hard problems.
- */
-export const PROVIDER_THINKING_BUDGETS: Record<EffortLevel, number> = {
-	low: 2000,
-	medium: 8000,
-	high: 16000,
-	max: 32000,
-	xhigh: 32000,
-};
+/** Host → runner secret keys; the runner reads exactly these two. */
+export const MODEL_SECRET = "PICOCLAW_MODEL";
+export const API_KEY_SECRET = "PICOCLAW_API_KEY";
 
+/**
+ * The env-secret block a container is spawned with: the fully-qualified pi
+ * model (`provider/model-id`) plus the one credential that provider needs.
+ * Anthropic uses the bot's own key or `sk-ant-oat…` OAuth token; other
+ * providers read a host env var or mint a token (xAI).
+ */
 export function readSecrets(
 	anthropicApiKey: string,
-	modelOverride?: string | undefined,
+	model: string,
 	provider?: ProviderConfig | undefined,
-	effort?: EffortLevel | undefined,
 ): Record<string, string> {
-	const secrets: Record<string, string> = {};
-	const envModel = process.env["ANTHROPIC_MODEL"];
-	if (envModel) secrets["ANTHROPIC_MODEL"] = envModel;
-	if (provider) {
-		// A provider may mint its credential instead of reading a host env var
-		// (xAI: a short-lived OAuth token the official `grok` CLI keeps fresh).
-		// The env var stays the documented fallback for both shapes.
-		const providerKey =
-			provider.resolveKey?.() ?? process.env[provider.apiKeyEnvVar];
-		if (!providerKey) {
-			throw new Error(
-				provider.resolveKey
-					? `Model routes to ${provider.baseUrl} but no credential is available — run \`grok login --device-auth\` on the host, or set ${provider.apiKeyEnvVar}`
-					: `Model routes to ${provider.baseUrl} but ${provider.apiKeyEnvVar} is not set in the host environment`,
-			);
-		}
-		secrets["ANTHROPIC_BASE_URL"] = provider.baseUrl;
-		if (provider.authStyle === "auth-token") {
-			secrets["ANTHROPIC_AUTH_TOKEN"] = providerKey;
-			// OpenRouter's Anthropic skin requires ANTHROPIC_API_KEY to be
-			// explicitly empty so the SDK doesn't fall back to it.
-			secrets["ANTHROPIC_API_KEY"] = "";
-		} else {
-			secrets["ANTHROPIC_API_KEY"] = providerKey;
-		}
-		// Effort only maps to a thinking budget for provider-backed models;
-		// Claude models keep the SDK's native adaptive-thinking effort.
-		if (effort) {
-			secrets["MAX_THINKING_TOKENS"] = String(
-				PROVIDER_THINKING_BUDGETS[effort],
-			);
-		}
-	} else if (anthropicApiKey.startsWith("sk-ant-oat")) {
-		secrets["CLAUDE_CODE_OAUTH_TOKEN"] = anthropicApiKey;
-	} else {
-		secrets["ANTHROPIC_API_KEY"] = anthropicApiKey;
+	if (!provider) {
+		return {
+			[MODEL_SECRET]: `anthropic/${model}`,
+			[API_KEY_SECRET]: anthropicApiKey,
+		};
 	}
-	if (modelOverride) {
-		secrets["ANTHROPIC_MODEL"] = modelOverride;
+	const providerKey =
+		provider.resolveKey?.() ?? process.env[provider.apiKeyEnvVar];
+	if (!providerKey) {
+		throw new Error(
+			provider.resolveKey
+				? `Model routes to ${provider.id} but no credential is available — run \`grok login --device-auth\` on the host, or set ${provider.apiKeyEnvVar}`
+				: `Model routes to ${provider.id} but ${provider.apiKeyEnvVar} is not set in the host environment`,
+		);
 	}
-	return secrets;
+	return {
+		[MODEL_SECRET]: `${provider.id}/${model}`,
+		[API_KEY_SECRET]: providerKey,
+	};
 }
 
 /**
@@ -136,25 +106,13 @@ export function seedWorkspace(chatId: string): void {
 	}
 }
 
+/** Dedicated pi agent dir (sessions jsonl, auth). Not the Claude `sessions/` dump. */
 export function ensureSessionsDir(chatId: string): void {
-	const sessionsDir = path.join(chatDir(chatId), "sessions");
-	mkdirAll(sessionsDir);
-
-	const settingsFile = path.join(sessionsDir, "settings.json");
-	if (!fs.existsSync(settingsFile)) {
-		fs.writeFileSync(
-			settingsFile,
-			`${JSON.stringify(
-				{
-					env: {
-						CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1",
-					},
-				},
-				null,
-				2,
-			)}\n`,
-		);
-	}
+	const dir = path.join(chatDir(chatId), "pi-agent");
+	mkdirAll(dir);
+	try {
+		fs.chmodSync(dir, 0o777);
+	} catch {}
 }
 
 /**
@@ -338,7 +296,7 @@ export async function spawnContainer(
 		"-v",
 		`${path.join(base, "workspace")}:/workspace`,
 		"-v",
-		`${path.join(base, "sessions")}:/home/bun/.claude`,
+		`${path.join(base, "pi-agent")}:/home/bun/.pi/agent`,
 		"-v",
 		`${path.join(base, "ipc")}:/ipc`,
 		"-v",
@@ -361,22 +319,16 @@ export async function spawnContainer(
 	// current alias mapping instead of a version frozen when it was created.
 	// Idempotent for concrete IDs (passthrough), so existing tasks/sessions
 	// that already stored a resolved model keep working unchanged.
-	// Provider-backed aliases (e.g. "k3") additionally carry an
-	// Anthropic-compatible endpoint config that is injected as env vars —
-	// same harness, different backend.
-	let provider: ProviderConfig | undefined;
-	if (input.model) {
-		const target = resolveModelTarget(input.model);
-		input.model = target.model;
-		provider = target.provider;
-	}
+	const target = resolveModelTarget(
+		input.model ?? process.env["ANTHROPIC_MODEL"] ?? DEFAULT_MODEL,
+	);
+	input.model = target.model;
 
 	// Pass secrets via stdin
 	input.secrets = readSecrets(
 		input.anthropicApiKey!,
-		input.model,
-		provider,
-		input.effort,
+		target.model,
+		target.provider,
 	);
 	input.anthropicApiKey = undefined;
 	// Inject AgentLair AAT if issued by the host
