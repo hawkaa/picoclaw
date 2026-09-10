@@ -191,12 +191,56 @@ export function resolveXaiAccessToken(
 	now: number = Date.now(),
 ): string | null {
 	const omp = readOmpCredential();
-	if (omp) return omp.accessToken;
+	if (omp && isFresh(omp, now, minLifetimeMs)) return omp.accessToken;
 
 	const cred = readGrokCliCredential();
 	if (cred && isFresh(cred, now, minLifetimeMs)) return cred.accessToken;
 	refreshViaOfficialCli();
 	const after = readGrokCliCredential();
-	if (!after) return null;
-	return after.accessToken;
+	if (after) return after.accessToken;
+	if (omp) return omp.accessToken;
+	return null;
+}
+
+type XaiProbeFetch = (
+	url: string,
+	init?: { headers?: Record<string, string>; signal?: AbortSignal },
+) => Promise<{ ok: boolean }>;
+
+/** Cheap liveness check. 2xx from /v1/models means the bearer will survive spawn. */
+export async function probeXaiAccessToken(
+	token: string,
+	fetchImpl: XaiProbeFetch = fetch,
+): Promise<boolean> {
+	try {
+		const res = await fetchImpl("https://api.x.ai/v1/models", {
+			headers: {
+				Authorization: `Bearer ${token}`,
+				Accept: "application/json",
+			},
+			signal: AbortSignal.timeout(10_000),
+		});
+		return res.ok;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Token that has been probed live, or null. If the omp JWT is expired or
+ * already revoked (expiry in the file can lie), refresh via the grok CLI and
+ * probe again so a container never starts with a 403 waiting on the first turn.
+ */
+export async function ensureXaiAccessToken(
+	minLifetimeMs: number,
+	fetchImpl: XaiProbeFetch = fetch,
+): Promise<string | null> {
+	const first = resolveXaiAccessToken(minLifetimeMs);
+	if (first && (await probeXaiAccessToken(first, fetchImpl))) return first;
+	refreshViaOfficialCli();
+	const after =
+		readGrokCliCredential()?.accessToken ??
+		resolveXaiAccessToken(minLifetimeMs);
+	if (after && (await probeXaiAccessToken(after, fetchImpl))) return after;
+	return after ?? first;
 }

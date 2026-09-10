@@ -21,6 +21,7 @@ import {
 	readSecrets,
 } from "./container-runner.ts";
 import {
+	ensureXaiAccessToken,
 	parseOmpXaiCredential,
 	parseXaiAuth,
 	resolveXaiAccessToken,
@@ -269,5 +270,56 @@ describe("resolveXaiAccessToken lifetime margin", () => {
 			XAI_PROVIDER.resolveKey?.();
 			expect(existsSync(ranMarker)).toBe(true);
 		});
+	});
+});
+
+describe("ensureXaiAccessToken", () => {
+	test("refreshes via the CLI when the first token fails the live probe", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "grok-home-"));
+		const authPath = join(dir, "auth.json");
+		writeFileSync(
+			authPath,
+			JSON.stringify({
+				[SCOPE]: {
+					key: "dead-token",
+					expires_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+				},
+			}),
+		);
+		const stub = join(dir, "grok-stub.sh");
+		writeFileSync(
+			stub,
+			`#!/bin/sh\ncat > "${authPath}" <<'EOF'\n${JSON.stringify({
+				[SCOPE]: {
+					key: "live-token",
+					expires_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+				},
+			})}\nEOF\n`,
+		);
+		chmodSync(stub, 0o755);
+		const prevHome = process.env["GROK_HOME"];
+		const prevBin = process.env["GROK_BIN"];
+		const prevOmp = process.env["OMP_AGENT_DIR"];
+		process.env["GROK_HOME"] = dir;
+		process.env["GROK_BIN"] = stub;
+		process.env["OMP_AGENT_DIR"] = join(dir, "no-omp");
+		let calls = 0;
+		const fakeFetch = async () => {
+			calls += 1;
+			return { ok: calls > 1 };
+		};
+		try {
+			const token = await ensureXaiAccessToken(60 * 60 * 1000, fakeFetch);
+			expect(token).toBe("live-token");
+			expect(calls).toBe(2);
+		} finally {
+			if (prevHome === undefined) delete process.env["GROK_HOME"];
+			else process.env["GROK_HOME"] = prevHome;
+			if (prevBin === undefined) delete process.env["GROK_BIN"];
+			else process.env["GROK_BIN"] = prevBin;
+			if (prevOmp === undefined) delete process.env["OMP_AGENT_DIR"];
+			else process.env["OMP_AGENT_DIR"] = prevOmp;
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
