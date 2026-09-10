@@ -344,17 +344,21 @@ async function runPrompt(
 			images: content.images,
 			expandPromptTemplates: false,
 		});
+	} catch (err) {
+		error = error ?? (err instanceof Error ? err.message : String(err));
 	} finally {
 		ipcPolling = false;
 		unsubscribe();
 	}
 
-	writeOutput({
-		status: "success",
-		result: null,
-		newSessionId: session.sessionId,
-		type: "result",
-	});
+	if (!error) {
+		writeOutput({
+			status: "success",
+			result: null,
+			newSessionId: session.sessionId,
+			type: "result",
+		});
+	}
 	log(
 		`Run done. closedDuringQuery=${closedDuringQuery} error=${error ?? "none"}`,
 	);

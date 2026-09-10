@@ -23,6 +23,7 @@ import type {
 	ContainerOutput,
 	ImageAttachment,
 } from "./types.ts";
+import { ensureXaiAccessToken } from "./xai-oauth.ts";
 
 const log = pino({ name: "container-runner" });
 
@@ -323,6 +324,12 @@ export async function spawnContainer(
 		input.model ?? process.env["ANTHROPIC_MODEL"] ?? DEFAULT_MODEL,
 	);
 	input.model = target.model;
+	if (target.provider?.id === "xai") {
+		const live = await ensureXaiAccessToken(CONTAINER_TIMEOUT);
+		if (live) {
+			target.provider = { ...target.provider, resolveKey: () => live };
+		}
+	}
 
 	// Pass secrets via stdin
 	input.secrets = readSecrets(

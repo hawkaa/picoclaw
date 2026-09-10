@@ -415,6 +415,12 @@ async function handleOutput(
 			"Streaming text chunk to Telegram",
 		);
 		await handleStreamingChunk(chatId, output.result);
+	} else if (output.status === "error" && output.error) {
+		log.error(
+			{ chatId, error: output.error },
+			"Forwarding agent error to Telegram",
+		);
+		await dispatchMessage(chatId, `Agent error: ${output.error}`);
 	} else if (output.result) {
 		log.info(
 			{
@@ -553,6 +559,32 @@ async function startContainer(
 				log.error({ chatId, error: finalOutput.error }, "Container error");
 			}
 
+			const authDeath =
+				finalOutput.status === "error" &&
+				/401|403|OAuth2 access token|could not be validated/i.test(
+					finalOutput.error ?? "",
+				);
+			if (
+				authDeath &&
+				!profile?.freshSession &&
+				spawnTime > (sessionResets.get(chatId) ?? 0)
+			) {
+				const retrySessions = readSessions();
+				const existingRetry = retrySessions[chatId];
+				if (existingRetry) {
+					retrySessions[chatId] = { ...existingRetry, sessionId: "" };
+					writeSessions(retrySessions);
+				}
+				log.warn(
+					{ chatId },
+					"xAI auth failed mid-session; retrying with a fresh session",
+				);
+				await startContainer(chatId, prompt, caller, images, {
+					...profile,
+					freshSession: true,
+				});
+				return;
+			}
 			// Audit: log session end
 			const endSessionId =
 				finalOutput.newSessionId ?? readSessions()[chatId]?.sessionId;
