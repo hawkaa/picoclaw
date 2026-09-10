@@ -21,6 +21,11 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import {
+	createWorkspaceGatesExtension,
+	parseAdditionalContext,
+	runWorkspaceHook,
+} from "./workspace-gates.ts";
 
 interface ImageAttachment {
 	data: string;
@@ -145,6 +150,24 @@ function sanitizedBashExtension(pi: ExtensionAPI): void {
 		},
 	});
 	pi.registerTool(bash);
+}
+
+/**
+ * Session ledger (Turso `sessions`), formerly the SessionStart/SessionEnd
+ * hooks. The runner owns the session boundary, so no extension API is needed.
+ * Best-effort by construction: a ledger write must never fail a session.
+ */
+let ledgerSessionId: string | undefined;
+
+function endLedgerSession(sessionId: string | undefined, reason: string): void {
+	if (!sessionId) return;
+	runWorkspaceHook(
+		WORKSPACE,
+		"tools/pico-db/session-hook.ts",
+		["end"],
+		{ session_id: sessionId, reason },
+		20_000,
+	);
 }
 
 function shouldClose(): boolean {
@@ -410,6 +433,10 @@ async function main(): Promise<void> {
 	if (containerInput.effort) {
 		process.env["PICOCLAW_EFFORT"] = containerInput.effort;
 	}
+	// Workspace tooling (git prepare-commit-msg trailer, session ledger) reads the
+	// running model from ANTHROPIC_MODEL. Claude Code set it; pi does not, so it
+	// was unset in every session after the PR #42 migration.
+	process.env["ANTHROPIC_MODEL"] ??= modelSpec;
 	const profile = containerInput.profile;
 	if (profile?.persona) process.env["PICOCLAW_PERSONA"] = profile.persona;
 	if (profile?.extraEnv) {
@@ -445,6 +472,22 @@ async function main(): Promise<void> {
 	if (containerInput.effort)
 		contextLines.push(`Effort: ${containerInput.effort}`);
 	systemPrompt += `\n\nSession context:\n${contextLines.join("\n")}`;
+	// SessionStart context injection (was a settings.json hook until PR #42).
+	// Working memory, active goals and the capability manifest are write-only
+	// unless something puts them in front of the session that must act on them.
+	const injected = parseAdditionalContext(
+		runWorkspaceHook(
+			WORKSPACE,
+			"tools/pico-db/context-hook.ts",
+			[],
+			{ hook_event_name: "SessionStart", source: "startup" },
+			8000,
+		),
+	);
+	if (injected) {
+		systemPrompt += `\n\n${injected}`;
+		log(`Injected session context (${injected.length} chars)`);
+	}
 	if (containerInput.isScheduledTask) {
 		systemPrompt +=
 			"\nThis is a scheduled task. Your last text output will be sent to the user on Telegram. If you need a follow-up, make sure to remember what needs following up, as any response to your message will start in a new session.";
@@ -472,6 +515,10 @@ async function main(): Promise<void> {
 			systemPromptOverride: () => systemPrompt,
 			extensionFactories: [
 				{ name: "picoclaw-bash", factory: sanitizedBashExtension },
+				{
+					name: "workspace-gates",
+					factory: createWorkspaceGatesExtension(WORKSPACE, log),
+				},
 			],
 			noExtensions: true,
 			additionalSkillPaths: loadProject
@@ -522,6 +569,12 @@ async function main(): Promise<void> {
 			log(`Extension error ${e.path}: ${e.error}`);
 		}
 		log(`Session ${priorFile ? "resumed" : "created"}: ${session.sessionId}`);
+		ledgerSessionId = session.sessionId;
+		runWorkspaceHook(WORKSPACE, "tools/pico-db/session-hook.ts", ["start"], {
+			session_id: session.sessionId,
+			source: containerInput.caller?.source ?? "scheduler",
+			transcript_path: sessionManager.getSessionFile() ?? null,
+		});
 		// Do not writeOutput here: a typeless packet makes the host treat the
 		// turn as finished and kills the Telegram typing indicator. Session id
 		// is attached to the type:result packet at the end of the first run.
@@ -563,9 +616,11 @@ async function main(): Promise<void> {
 			newSessionId: session?.sessionId,
 			error: errorMessage,
 		});
+		endLedgerSession(ledgerSessionId, "error");
 		session?.dispose();
 		process.exit(1);
 	}
+	endLedgerSession(ledgerSessionId, "close");
 	session?.dispose();
 }
 
