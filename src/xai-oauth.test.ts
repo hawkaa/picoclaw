@@ -22,7 +22,6 @@ import {
 } from "./container-runner.ts";
 import {
 	ensureXaiAccessToken,
-	parseOmpXaiCredential,
 	parseXaiAuth,
 	resolveXaiAccessToken,
 } from "./xai-oauth.ts";
@@ -82,32 +81,6 @@ describe("parseXaiAuth", () => {
 		const parsed = parseXaiAuth(authFile({ key: "tok" }));
 		expect(parsed?.accessToken).toBe("tok");
 		expect(parsed?.expiresAt).toBeNull();
-	});
-});
-
-describe("parseOmpXaiCredential", () => {
-	test("reads access + epoch-ms expiry from omp's sqlite blob", () => {
-		const parsed = parseOmpXaiCredential(
-			JSON.stringify({
-				access: "header.payload.signature",
-				refresh: "opaque",
-				expires: 1789038477920,
-				accountId: "bc8bd46f",
-				email: "hakon@aamdal.com",
-			}),
-		);
-		expect(parsed?.accessToken).toBe("header.payload.signature");
-		expect(parsed?.expiresAt).toBe(1789038477920);
-	});
-
-	test("returns null on malformed JSON rather than throwing", () => {
-		expect(parseOmpXaiCredential("{not json")).toBeNull();
-	});
-
-	test("rejects a token containing control characters", () => {
-		expect(
-			parseOmpXaiCredential(JSON.stringify({ access: "abc\ndef", expires: 1 })),
-		).toBeNull();
 	});
 });
 
@@ -219,11 +192,8 @@ describe("resolveXaiAccessToken lifetime margin", () => {
 		chmodSync(stub, 0o755);
 		const prevHome = process.env["GROK_HOME"];
 		const prevBin = process.env["GROK_BIN"];
-		const prevOmp = process.env["OMP_AGENT_DIR"];
 		process.env["GROK_HOME"] = dir;
 		process.env["GROK_BIN"] = stub;
-		// Don't let a live omp login on the test host short-circuit the CLI path.
-		process.env["OMP_AGENT_DIR"] = join(dir, "no-omp");
 		try {
 			run(dir, ranMarker);
 		} finally {
@@ -231,8 +201,6 @@ describe("resolveXaiAccessToken lifetime margin", () => {
 			else process.env["GROK_HOME"] = prevHome;
 			if (prevBin === undefined) delete process.env["GROK_BIN"];
 			else process.env["GROK_BIN"] = prevBin;
-			if (prevOmp === undefined) delete process.env["OMP_AGENT_DIR"];
-			else process.env["OMP_AGENT_DIR"] = prevOmp;
 			rmSync(dir, { recursive: true, force: true });
 		}
 	}
@@ -299,10 +267,8 @@ describe("ensureXaiAccessToken", () => {
 		chmodSync(stub, 0o755);
 		const prevHome = process.env["GROK_HOME"];
 		const prevBin = process.env["GROK_BIN"];
-		const prevOmp = process.env["OMP_AGENT_DIR"];
 		process.env["GROK_HOME"] = dir;
 		process.env["GROK_BIN"] = stub;
-		process.env["OMP_AGENT_DIR"] = join(dir, "no-omp");
 		let calls = 0;
 		const fakeFetch = async () => {
 			calls += 1;
@@ -317,8 +283,6 @@ describe("ensureXaiAccessToken", () => {
 			else process.env["GROK_HOME"] = prevHome;
 			if (prevBin === undefined) delete process.env["GROK_BIN"];
 			else process.env["GROK_BIN"] = prevBin;
-			if (prevOmp === undefined) delete process.env["OMP_AGENT_DIR"];
-			else process.env["OMP_AGENT_DIR"] = prevOmp;
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});

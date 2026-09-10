@@ -63,10 +63,8 @@ export const MOONSHOT_PROVIDER: ProviderConfig = {
 };
 
 /**
- * xAI via SuperGrok OAuth (omp's `xai-oauth` store, grok CLI fallback).
- * Inert until an operator has logged in. Measured 2026-09-08/10: this bearer
- * is accepted by api.x.ai but billed per token at 0.17× list — NOT the flat
- * SuperGrok pool, which only the official CLI reaches (cli-chat-proxy.grok.com).
+ * xAI via SuperGrok OAuth (`grok login` on the host). Inert until an
+ * operator has logged in. PicoClaw only reads ~/.grok/auth.json.
  */
 export const XAI_PROVIDER: ProviderConfig = {
 	id: "xai",
