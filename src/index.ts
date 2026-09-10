@@ -429,8 +429,9 @@ async function handleOutput(
 		log.debug({ chatId }, "Output with null result (session update only)");
 	}
 
-	// Finalize streaming and stop typing on turn completion.
-	if (output.type !== "text") {
+	// Typing stays up through text chunks and tool_use. Only a completed
+	// turn (or an error) is "done" from Telegram's point of view.
+	if (output.type === "result" || output.status === "error") {
 		await finalizeStreaming(chatId);
 		stopTyping(chatId);
 	}
