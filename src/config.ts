@@ -26,14 +26,14 @@ export const PRECONDITION_TIMEOUT = 30 * 1000; // 30s
 export const TELEGRAM_POLL_TIMEOUT = 30; // seconds
 
 /**
- * Non-Anthropic providers exposing an Anthropic-compatible API. The Claude
- * Agent SDK is pointed at them purely via environment variables, so the
- * harness (system prompt, CLAUDE.md, skills, hooks, IPC) is identical across
- * providers.
+ * A pi provider the runner can route to. The runner resolves
+ * `provider/model-id` against pi's model catalog and hands it the credential
+ * directly, so every backend shares one harness (system prompt, CLAUDE.md,
+ * skills, IPC). Provider ids are pi's: https://github.com/earendil-works/pi
  */
 export interface ProviderConfig {
-	/** Anthropic-compatible endpoint, injected as ANTHROPIC_BASE_URL. */
-	baseUrl: string;
+	/** pi provider id (`anthropic`, `openrouter`, `moonshotai`, `xai`). */
+	id: string;
 	/** Host env var holding the provider API key (never stored in bots.json). */
 	apiKeyEnvVar: string;
 	/**
@@ -43,49 +43,41 @@ export interface ProviderConfig {
 	 * raises the same missing-key error as an unset env var.
 	 */
 	resolveKey?: (() => string | null) | undefined;
-	/**
-	 * How the endpoint authenticates:
-	 * - "api-key": key goes in ANTHROPIC_API_KEY (Moonshot style)
-	 * - "auth-token": key goes in ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY
-	 *   must be explicitly empty (OpenRouter style)
-	 */
-	authStyle: "api-key" | "auth-token";
 }
 
 export interface ModelTarget {
 	model: string;
+	/** Omitted → Anthropic, authenticated with the bot's own key/OAuth token. */
 	provider?: ProviderConfig | undefined;
 }
 
-/**
- * OpenRouter's Anthropic-compatible "skin". Any OpenRouter model id works
- * through it — nothing is hardcoded per model.
- * (https://openrouter.ai/docs — ANTHROPIC_AUTH_TOKEN + empty ANTHROPIC_API_KEY)
- */
+/** Any `vendor/model` id routes through OpenRouter generically. */
 export const OPENROUTER_PROVIDER: ProviderConfig = {
-	baseUrl: "https://openrouter.ai/api",
+	id: "openrouter",
 	apiKeyEnvVar: "OPENROUTER_API_KEY",
-	authStyle: "auth-token",
+};
+
+export const MOONSHOT_PROVIDER: ProviderConfig = {
+	id: "moonshotai",
+	apiKeyEnvVar: "MOONSHOT_API_KEY",
 };
 
 /**
- * xAI's Anthropic-compatible Messages API, authenticated with the OAuth token
- * the official `grok` CLI mints and refreshes on this host (see xai-oauth.ts).
- * That routes frontier work onto a flat-price Grok subscription instead of
- * per-token billing. Inert until an operator runs `grok login --device-auth`.
- *
- * Measured 2026-09-08: POST https://api.x.ai/v1/messages with
- * `Authorization: Bearer <oauth>` returns 200 for grok-4.6. The same request
- * with `x-api-key` returns 400, hence auth-token style.
+ * xAI via SuperGrok OAuth (omp's `xai-oauth` store, grok CLI fallback).
+ * Inert until an operator has logged in. Measured 2026-09-08/10: this bearer
+ * is accepted by api.x.ai but billed per token at 0.17× list — NOT the flat
+ * SuperGrok pool, which only the official CLI reaches (cli-chat-proxy.grok.com).
  */
 export const XAI_PROVIDER: ProviderConfig = {
-	baseUrl: "https://api.x.ai",
+	id: "xai",
 	apiKeyEnvVar: "XAI_API_KEY",
 	// The token is minted once, at spawn, and never re-read — so it has to
 	// outlive the longest a container can run. CONTAINER_TIMEOUT is that bound.
 	resolveKey: () => resolveXaiAccessToken(CONTAINER_TIMEOUT),
-	authStyle: "auth-token",
 };
+
+/** Used when neither the session, the bot, nor ANTHROPIC_MODEL names a model. */
+export const DEFAULT_MODEL = "claude-opus-5";
 
 export const MODEL_ALIASES: Record<string, string | ModelTarget> = {
 	fable: "claude-fable-5",
@@ -96,19 +88,11 @@ export const MODEL_ALIASES: Record<string, string | ModelTarget> = {
 	"opus-4.6": "claude-opus-4-6",
 	sonnet: "claude-sonnet-4-6",
 	haiku: "claude-haiku-4-5-20251001",
-	// Kimi K3 via Moonshot's own Anthropic-compatible endpoint
-	// (https://platform.kimi.ai/docs/guide/claude-code-kimi)
-	k3: {
-		model: "kimi-k3",
-		provider: {
-			baseUrl: "https://api.moonshot.ai/anthropic",
-			apiKeyEnvVar: "MOONSHOT_API_KEY",
-			authStyle: "api-key",
-		},
-	},
+	// Kimi K3 direct from Moonshot
+	k3: { model: "kimi-k3", provider: MOONSHOT_PROVIDER },
 	// Convenience shorthand; the slash form routes via OpenRouter (see below)
 	kimi: "moonshotai/kimi-k3",
-	// Grok on the host's own subscription. These ids carry no slash, so they
+	// Grok on the host's own xAI login. These ids carry no slash, so they
 	// need explicit targets — inferProvider would otherwise read them as
 	// Anthropic model names. `x-ai/grok-4.6` still routes via OpenRouter.
 	grok: { model: "grok-4.6", provider: XAI_PROVIDER },

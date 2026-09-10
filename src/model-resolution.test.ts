@@ -60,12 +60,11 @@ describe("resolveModelTarget (provider-aware resolution)", () => {
 		expect(target.provider).toBeUndefined();
 	});
 
-	test("k3 routes to Moonshot's Anthropic-compatible endpoint", () => {
+	test("k3 routes direct to Moonshot", () => {
 		const target = resolveModelTarget("k3");
 		expect(target.model).toBe("kimi-k3");
-		expect(target.provider?.baseUrl).toBe("https://api.moonshot.ai/anthropic");
+		expect(target.provider?.id).toBe("moonshotai");
 		expect(target.provider?.apiKeyEnvVar).toBe("MOONSHOT_API_KEY");
-		expect(target.provider?.authStyle).toBe("api-key");
 	});
 
 	test("any vendor/model id routes via OpenRouter — no per-model hardcoding", () => {
@@ -76,16 +75,15 @@ describe("resolveModelTarget (provider-aware resolution)", () => {
 		]) {
 			const target = resolveModelTarget(id);
 			expect(target.model).toBe(id);
-			expect(target.provider?.baseUrl).toBe("https://openrouter.ai/api");
+			expect(target.provider?.id).toBe("openrouter");
 			expect(target.provider?.apiKeyEnvVar).toBe("OPENROUTER_API_KEY");
-			expect(target.provider?.authStyle).toBe("auth-token");
 		}
 	});
 
 	test("string aliases pointing at a vendor/model id inherit the OpenRouter provider", () => {
 		const target = resolveModelTarget("kimi");
 		expect(target.model).toBe("moonshotai/kimi-k3");
-		expect(target.provider?.authStyle).toBe("auth-token");
+		expect(target.provider?.id).toBe("openrouter");
 	});
 
 	test("Anthropic ids and aliases never get a provider (subscription auth untouched)", () => {

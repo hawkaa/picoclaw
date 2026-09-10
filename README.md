@@ -1,10 +1,10 @@
 # PicoClaw
 
-Minimal infrastructure for running Claude agents persistently, in isolation, over time.
+Minimal infrastructure for running AI agents persistently, in isolation, over time.
 
 ## What it is
 
-PicoClaw is a Bun/TypeScript host that manages Claude agent sessions in Docker containers. Each session gets an ephemeral container with an isolated filesystem and no access to the host except what's explicitly mounted. The agent has a real working directory that persists across sessions, a scheduler that runs it on cron without human invocation, and memory that compounds between runs.
+PicoClaw is a Bun/TypeScript host that manages agent sessions in Docker containers. Each session gets an ephemeral container with an isolated filesystem and no access to the host except what's explicitly mounted. The agent has a real working directory that persists across sessions, a scheduler that runs it on cron without human invocation, and memory that compounds between runs.
 
 The agent loop itself is small. The container boundary, the workspace persistence, the scheduler, the IPC layer — that's what PicoClaw is.
 
@@ -40,10 +40,10 @@ Host process (Bun)
 └── Workspace git   →  auto-commits after each session
 
 Container (agent session)
-├── Claude Agent SDK
+├── pi coding agent SDK
 ├── /workspace (persistent volume)
 ├── /ipc (messaging)
-└── ~/.claude/ (session transcripts)
+└── ~/.pi/agent/ (session transcripts)
 ```
 
 Reference: `memory/knowledge/picoclaw-architecture.md` (inside the workspace).

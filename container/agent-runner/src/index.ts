@@ -1,6 +1,6 @@
 /**
  * PicoClaw Agent Runner
- * Runs inside a container, receives config via stdin, calls Claude Agent SDK.
+ * Runs inside a container, receives config via stdin, drives a pi agent session.
  *
  * Stdin: ContainerInput JSON
  * IPC:   Follow-up messages via /ipc/input/, _close sentinel to exit
@@ -9,13 +9,18 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
 import {
-	type HookCallback,
-	type PreToolUseHookInput,
-	query,
-	type SDKUserMessage,
-	type SettingSource,
-} from "@anthropic-ai/claude-agent-sdk";
+	type AgentSession,
+	type AgentSessionEvent,
+	createAgentSession,
+	createBashTool,
+	DefaultResourceLoader,
+	type ExtensionAPI,
+	ModelRuntime,
+	SessionManager,
+	SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 
 interface ImageAttachment {
 	data: string;
@@ -27,7 +32,8 @@ type EffortLevel = "low" | "medium" | "high" | "max" | "xhigh";
 interface SessionProfile {
 	persona?: string;
 	systemPromptOverlay?: string;
-	settingSources?: SettingSource[];
+	/** ["user"] suppresses the workspace CLAUDE.md and skills; default loads both. */
+	settingSources?: string[];
 	extraEnv?: Record<string, string>;
 	freshSession?: boolean;
 }
@@ -52,14 +58,14 @@ interface ContainerOutput {
 	type?: "text" | "result" | undefined;
 }
 
-// Content block types matching Anthropic API
-type TextBlock = { type: "text"; text: string };
-type ImageBlock = {
-	type: "image";
-	source: { type: "base64"; media_type: string; data: string };
-};
-type ContentBlock = TextBlock | ImageBlock;
-type MessageContent = string | ContentBlock[];
+interface UserContent {
+	text: string;
+	images: ImageContent[];
+}
+
+const WORKSPACE = "/workspace";
+const AGENT_DIR = "/home/bun/.pi/agent";
+const SESSION_DIR = path.join(AGENT_DIR, "sessions");
 
 const IPC_INPUT_DIR = "/ipc/input";
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, "_close");
@@ -67,6 +73,12 @@ const IPC_POLL_MS = 500;
 
 const OUTPUT_START_MARKER = "---PICOCLAW_OUTPUT_START---";
 const OUTPUT_END_MARKER = "---PICOCLAW_OUTPUT_END---";
+
+/** Host → runner: which model to run and the credential for its provider. */
+const MODEL_SECRET = "PICOCLAW_MODEL";
+const API_KEY_SECRET = "PICOCLAW_API_KEY";
+
+const TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
 const SYSTEM_PROMPT = `You are an autonomous agent in a persistent Debian container.
 
@@ -79,74 +91,12 @@ If /workspace/Dockerfile.extra exists, it extends your container image (cached, 
 If /workspace/start.sh exists, it runs before you start.
 To send a message while still working, write a JSON file to /ipc/messages/.`;
 
-/** Build multimodal content from text and optional images. */
-function buildContent(
-	text: string,
-	images?: ImageAttachment[],
-): MessageContent {
-	if (!images || images.length === 0) return text;
-
-	const blocks: ContentBlock[] = [];
-	for (const img of images) {
-		blocks.push({
-			type: "image",
-			source: {
-				type: "base64",
-				media_type: img.mediaType,
-				data: img.data,
-			},
-		});
-	}
-	if (text) {
-		blocks.push({ type: "text", text });
-	}
-	return blocks;
-}
-
-class MessageStream {
-	private queue: SDKUserMessage[] = [];
-	private waiting: (() => void) | null = null;
-	private done = false;
-	sessionId = "";
-
-	push(content: MessageContent): void {
-		this.queue.push({
-			type: "user",
-			// Our ImageBlock mirrors the API shape but types media_type as plain
-			// string (it arrives from host JSON); the SDK wants the literal union.
-			message: {
-				role: "user",
-				content: content as SDKUserMessage["message"]["content"],
-			},
-			parent_tool_use_id: null,
-			session_id: "",
-		});
-		this.waiting?.();
-	}
-
-	end(): void {
-		this.done = true;
-		this.waiting?.();
-	}
-
-	async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
-		while (true) {
-			for (
-				let msg = this.queue.shift();
-				msg !== undefined;
-				msg = this.queue.shift()
-			) {
-				// Use the current session ID (set after system/init message arrives)
-				msg.session_id = this.sessionId;
-				yield msg;
-			}
-			if (this.done) return;
-			await new Promise<void>((r) => {
-				this.waiting = r;
-			});
-			this.waiting = null;
-		}
-	}
+function toImages(images?: ImageAttachment[]): ImageContent[] {
+	return (images ?? []).map((img) => ({
+		type: "image",
+		data: img.data,
+		mimeType: img.mediaType,
+	}));
 }
 
 function writeOutput(output: ContainerOutput): void {
@@ -160,41 +110,40 @@ function log(message: string): void {
 }
 
 async function readStdin(): Promise<string> {
-	return new Promise((resolve, reject) => {
-		let data = "";
-		process.stdin.setEncoding("utf8");
-		process.stdin.on("data", (chunk) => {
-			data += chunk;
-		});
-		process.stdin.on("end", () => resolve(data));
-		process.stdin.on("error", reject);
+	const { promise, resolve, reject } = Promise.withResolvers<string>();
+	let data = "";
+	process.stdin.setEncoding("utf8");
+	process.stdin.on("data", (chunk) => {
+		data += chunk;
 	});
+	process.stdin.on("end", () => resolve(data));
+	process.stdin.on("error", reject);
+	return promise;
 }
 
-// Secrets to strip from Bash subprocesses
+/**
+ * The provider credential never enters process.env (it is handed to the model
+ * runtime directly), but scrub it from tool subprocesses anyway in case a
+ * profile or start.sh re-exports it.
+ */
 const SECRET_ENV_VARS = [
+	API_KEY_SECRET,
 	"ANTHROPIC_API_KEY",
-	"ANTHROPIC_AUTH_TOKEN",
-	"CLAUDE_CODE_OAUTH_TOKEN",
+	"ANTHROPIC_OAUTH_TOKEN",
+	"OPENROUTER_API_KEY",
+	"MOONSHOT_API_KEY",
+	"XAI_API_KEY",
 ];
 
-function createSanitizeBashHook(): HookCallback {
-	return async (input, _toolUseId, _context) => {
-		const preInput = input as PreToolUseHookInput;
-		const command = (preInput.tool_input as { command?: string })?.command;
-		if (!command) return {};
-
-		const unsetPrefix = `unset ${SECRET_ENV_VARS.join(" ")} 2>/dev/null; `;
-		return {
-			hookSpecificOutput: {
-				hookEventName: "PreToolUse",
-				updatedInput: {
-					...(preInput.tool_input as Record<string, unknown>),
-					command: unsetPrefix + command,
-				},
-			},
-		};
-	};
+function sanitizedBashExtension(pi: ExtensionAPI): void {
+	const bash = createBashTool(WORKSPACE, {
+		spawnHook: ({ command, cwd, env }) => {
+			const clean = { ...env };
+			for (const key of SECRET_ENV_VARS) delete clean[key];
+			return { command, cwd, env: clean };
+		},
+	});
+	pi.registerTool(bash);
 }
 
 function shouldClose(): boolean {
@@ -207,12 +156,7 @@ function shouldClose(): boolean {
 	return false;
 }
 
-/** Parsed IPC input message with optional image attachments. */
-interface IpcMessage {
-	content: MessageContent;
-}
-
-function drainIpcInput(): IpcMessage[] {
+function drainIpcInput(): UserContent[] {
 	try {
 		fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
 		const files = fs
@@ -220,7 +164,7 @@ function drainIpcInput(): IpcMessage[] {
 			.filter((f) => f.endsWith(".json"))
 			.sort();
 
-		const messages: IpcMessage[] = [];
+		const messages: UserContent[] = [];
 		for (const file of files) {
 			const filePath = path.join(IPC_INPUT_DIR, file);
 			try {
@@ -234,9 +178,9 @@ function drainIpcInput(): IpcMessage[] {
 					const text = from
 						? `[${from.name} via ${from.source}] ${rawText}`
 						: rawText;
-					const images = data.images as ImageAttachment[] | undefined;
 					messages.push({
-						content: buildContent(text, images),
+						text,
+						images: toImages(data.images as ImageAttachment[] | undefined),
 					});
 				}
 			} catch (err) {
@@ -255,163 +199,157 @@ function drainIpcInput(): IpcMessage[] {
 	}
 }
 
-function waitForIpcMessage(): Promise<IpcMessage[] | null> {
-	return new Promise((resolve) => {
-		const poll = () => {
-			if (shouldClose()) {
-				resolve(null);
-				return;
-			}
-			const messages = drainIpcInput();
-			if (messages.length > 0) {
-				resolve(messages);
-				return;
-			}
-			setTimeout(poll, IPC_POLL_MS);
-		};
-		poll();
-	});
+function waitForIpcMessage(): Promise<UserContent[] | null> {
+	const { promise, resolve } = Promise.withResolvers<UserContent[] | null>();
+	const poll = () => {
+		if (shouldClose()) {
+			resolve(null);
+			return;
+		}
+		const messages = drainIpcInput();
+		if (messages.length > 0) {
+			resolve(messages);
+			return;
+		}
+		setTimeout(poll, IPC_POLL_MS);
+	};
+	poll();
+	return promise;
 }
 
-async function runQuery(
-	content: MessageContent,
-	sessionId: string | undefined,
-	sdkEnv: Record<string, string | undefined>,
-	systemPrompt: string,
-	resumeAt?: string,
-	effort?: EffortLevel,
-	settingSources?: SettingSource[],
-): Promise<{
-	newSessionId?: string | undefined;
-	lastAssistantUuid?: string | undefined;
-	closedDuringQuery: boolean;
-}> {
-	const stream = new MessageStream();
-	stream.push(content);
+/** Merge several queued messages into one prompt. */
+function mergeContent(messages: UserContent[]): UserContent {
+	return {
+		text: messages.map((m) => m.text).join("\n"),
+		images: messages.flatMap((m) => m.images),
+	};
+}
 
+/**
+ * Find the session file for a previously issued session id. pi names files
+ * `<timestamp>_<uuid>.jsonl`; the host only keeps the uuid.
+ */
+function findSessionFile(sessionId: string): string | undefined {
+	const dir = path.join(SESSION_DIR, "--workspace--");
+	try {
+		const match = fs
+			.readdirSync(dir)
+			.find((f) => f.endsWith(`_${sessionId}.jsonl`));
+		return match ? path.join(dir, match) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Resolve `provider/model-id` against pi's catalog. Unknown OpenRouter ids are
+ * accepted by cloning a catalog sibling's wire config — OpenRouter serves any
+ * vendor/model id through one protocol, so `/new deepseek/deepseek-chat` keeps
+ * working without a catalog entry. Limits are pinned conservatively because
+ * the sibling's own would be wrong for the unknown model.
+ */
+function resolveModel(runtime: ModelRuntime, spec: string): Model<Api> {
+	const slash = spec.indexOf("/");
+	if (slash < 1)
+		throw new Error(`${MODEL_SECRET} must be provider/model, got "${spec}"`);
+	const provider = spec.slice(0, slash);
+	const id = spec.slice(slash + 1);
+	const known = runtime.getModel(provider, id);
+	if (known) return known;
+	if (provider === "openrouter") {
+		const template = runtime.getModel("openrouter", "deepseek/deepseek-chat");
+		if (template) {
+			log(`Model ${spec} not in catalog; using generic OpenRouter config`);
+			return {
+				...template,
+				id,
+				name: id,
+				contextWindow: 128_000,
+				maxTokens: 16_000,
+			};
+		}
+	}
+	throw new Error(`Unknown model "${spec}" for provider "${provider}"`);
+}
+
+function assistantText(event: AgentSessionEvent): string | null {
+	if (event.type !== "message_end") return null;
+	const msg = event.message;
+	if (msg.role !== "assistant") return null;
+	const texts = msg.content
+		.filter((b): b is { type: "text"; text: string } => b.type === "text")
+		.map((b) => b.text)
+		.filter((t) => t.trim().length > 0);
+	return texts.length > 0 ? texts.join("\n") : null;
+}
+
+function assistantError(event: AgentSessionEvent): string | null {
+	if (event.type !== "message_end") return null;
+	const msg = event.message;
+	if (msg.role !== "assistant" || msg.stopReason !== "error") return null;
+	return msg.errorMessage ?? "assistant turn failed";
+}
+
+/**
+ * One agent run: prompt → (steer with IPC arrivals) → agent_end.
+ * Returns whether the close sentinel arrived mid-run.
+ */
+async function runPrompt(
+	session: AgentSession,
+	content: UserContent,
+): Promise<{ closedDuringQuery: boolean; error: string | null }> {
 	let ipcPolling = true;
 	let closedDuringQuery = false;
+	let error: string | null = null;
 
 	const pollIpcDuringQuery = () => {
 		if (!ipcPolling) return;
 		if (shouldClose()) {
 			closedDuringQuery = true;
-			stream.end();
 			ipcPolling = false;
+			void session.abort();
 			return;
 		}
 		const messages = drainIpcInput();
-		for (const msg of messages) {
-			const preview =
-				typeof msg.content === "string"
-					? msg.content.length
-					: `${msg.content.length} blocks`;
-			log(`Piping IPC message into active query (${preview})`);
-			stream.push(msg.content);
+		if (messages.length > 0) {
+			const merged = mergeContent(messages);
+			log(`Steering active run with IPC message (${merged.text.length} chars)`);
+			void session.steer(merged.text, merged.images);
 		}
 		setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
 	};
 	setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
 
-	let newSessionId: string | undefined;
-	let lastAssistantUuid: string | undefined;
-	let resultCount = 0;
-	// Accumulate all assistant text blocks as fallback when SDK result is empty
-	const assistantTexts: string[] = [];
-
-	for await (const message of query({
-		prompt: stream,
-		options: {
-			cwd: "/workspace",
-			...(sessionId !== undefined ? { resume: sessionId } : {}),
-			...(resumeAt !== undefined ? { resumeSessionAt: resumeAt } : {}),
-			systemPrompt,
-			allowedTools: [
-				"Bash",
-				"Read",
-				"Write",
-				"Edit",
-				"Glob",
-				"Grep",
-				"WebSearch",
-				"WebFetch",
-				"Task",
-				"TaskOutput",
-				"TaskStop",
-				"TodoWrite",
-				"NotebookEdit",
-			],
-			env: sdkEnv,
-			// CLI 2.1.126+ ships as a native binary; the SDK exec's any path not
-			// ending in .js/.mjs/.ts/.tsx/.jsx directly, so no node/bun wrapper.
-			pathToClaudeCodeExecutable: "/usr/local/bin/claude",
-			permissionMode: "bypassPermissions",
-			allowDangerouslySkipPermissions: true,
-			settingSources: settingSources ?? ["project", "user"],
-			...(effort ? { effort } : {}),
-			hooks: {
-				PreToolUse: [{ matcher: "Bash", hooks: [createSanitizeBashHook()] }],
-			},
-		},
-	})) {
-		if (message.type === "assistant") {
-			if ("uuid" in message)
-				lastAssistantUuid = (message as { uuid: string }).uuid;
-			// Log assistant content for debugging (text blocks only, skip tool_use)
-			const msg = message as { message?: { content?: unknown[] } };
-			const textBlocks = (msg.message?.content ?? [])
-				.filter(
-					(b): b is { type: "text"; text: string } =>
-						typeof b === "object" &&
-						b !== null &&
-						(b as { type: string }).type === "text",
-				)
-				.map((b) => b.text);
-			if (textBlocks.length > 0) {
-				const text = textBlocks.join("\n");
-				log(`Assistant text: ${text.slice(0, 300)}`);
-				assistantTexts.push(text);
-				// Stream to host immediately
-				writeOutput({ status: "success", result: text, type: "text" });
-			}
+	const unsubscribe = session.subscribe((event) => {
+		const text = assistantText(event);
+		if (text !== null) {
+			log(`Assistant text: ${text.slice(0, 300)}`);
+			writeOutput({ status: "success", result: text, type: "text" });
 		}
+		const err = assistantError(event);
+		if (err !== null) error = err;
+	});
 
-		if (message.type === "system" && message.subtype === "init") {
-			newSessionId = message.session_id;
-			stream.sessionId = newSessionId;
-			log(`Session initialized: ${newSessionId}`);
-		}
-
-		if (message.type === "result") {
-			resultCount++;
-			const textResult =
-				"result" in message ? (message as { result?: string }).result : null;
-			const stopReason =
-				"stop_reason" in message
-					? (message as { stop_reason?: string | null }).stop_reason
-					: undefined;
-			// Always use accumulated assistant text — the SDK result only contains the
-			// last turn which may be skill bookkeeping instead of the real response.
-			const allAssistantText = assistantTexts.join("\n\n");
-			const finalResult = allAssistantText || null;
-			log(
-				`Result #${resultCount}: stop_reason=${stopReason}, textResult=${textResult ? `"${textResult.slice(0, 200)}"` : "null"}, assistantTexts=${assistantTexts.length} blocks (${allAssistantText.length} chars), finalResult=${finalResult ? `"${finalResult.slice(0, 200)}"` : "null"}`,
-			);
-			writeOutput({
-				status: "success",
-				result: null,
-				newSessionId,
-				type: "result",
-			});
-			assistantTexts.length = 0;
-		}
+	try {
+		await session.prompt(content.text, {
+			images: content.images,
+			expandPromptTemplates: false,
+		});
+	} finally {
+		ipcPolling = false;
+		unsubscribe();
 	}
 
-	ipcPolling = false;
+	writeOutput({
+		status: "success",
+		result: null,
+		newSessionId: session.sessionId,
+		type: "result",
+	});
 	log(
-		`Query done. Results: ${resultCount}, closedDuringQuery: ${closedDuringQuery}`,
+		`Run done. closedDuringQuery=${closedDuringQuery} error=${error ?? "none"}`,
 	);
-	return { newSessionId, lastAssistantUuid, closedDuringQuery };
+	return { closedDuringQuery, error };
 }
 
 async function main(): Promise<void> {
@@ -430,162 +368,180 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
-	// Build SDK env: merge secrets without touching process.env
-	const sdkEnv: Record<string, string | undefined> = { ...process.env };
-	for (const [key, value] of Object.entries(containerInput.secrets || {})) {
-		sdkEnv[key] = value;
+	const secrets = containerInput.secrets ?? {};
+	const modelSpec = secrets[MODEL_SECRET];
+	const apiKey = secrets[API_KEY_SECRET];
+	if (!modelSpec || !apiKey) {
+		writeOutput({
+			status: "error",
+			result: null,
+			error: `Host must supply ${MODEL_SECRET} and ${API_KEY_SECRET}`,
+		});
+		process.exit(1);
 	}
 
-	// Expose session metadata as env vars for hooks and scripts
-	sdkEnv["PICOCLAW_SESSION_TYPE"] = containerInput.isScheduledTask
+	// Non-credential secrets (AGENTLAIR_AAT etc.) and session metadata go to
+	// process.env so tools and scripts see them. The provider credential is
+	// handed to the model runtime only.
+	for (const [key, value] of Object.entries(secrets)) {
+		if (key === MODEL_SECRET || key === API_KEY_SECRET) continue;
+		process.env[key] = value;
+	}
+	process.env["PICOCLAW_SESSION_TYPE"] = containerInput.isScheduledTask
 		? "cron"
 		: "interactive";
 	if (containerInput.caller) {
-		sdkEnv["PICOCLAW_USER"] = containerInput.caller.name;
-		sdkEnv["PICOCLAW_SOURCE"] = containerInput.caller.source;
+		process.env["PICOCLAW_USER"] = containerInput.caller.name;
+		process.env["PICOCLAW_SOURCE"] = containerInput.caller.source;
 	}
 	if (containerInput.effort) {
-		sdkEnv["PICOCLAW_EFFORT"] = containerInput.effort;
+		process.env["PICOCLAW_EFFORT"] = containerInput.effort;
 	}
-
-	// Session profile: persona + env overrides (applied last so they win over secrets/process.env).
 	const profile = containerInput.profile;
-	if (profile?.persona) sdkEnv["PICOCLAW_PERSONA"] = profile.persona;
+	if (profile?.persona) process.env["PICOCLAW_PERSONA"] = profile.persona;
 	if (profile?.extraEnv) {
-		for (const [k, v] of Object.entries(profile.extraEnv)) sdkEnv[k] = v;
+		for (const [k, v] of Object.entries(profile.extraEnv)) process.env[k] = v;
 	}
 
-	let sessionId = profile?.freshSession ? undefined : containerInput.sessionId;
 	fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
-
-	// Clean stale _close sentinel
+	fs.mkdirSync(SESSION_DIR, { recursive: true });
 	try {
 		fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL);
 	} catch {}
 
-	// Build system prompt with session context
+	// System prompt: base + workspace overlay + session context.
 	let systemPrompt = SYSTEM_PROMPT;
-
-	// Workspace system-level overlay (optional). The profile may point at a different
-	// overlay or disable it ("" → boot without the operator constitution).
 	const overlayRel = profile?.systemPromptOverlay ?? "my-prompt.md";
 	if (overlayRel) {
 		try {
 			const overlay = fs
-				.readFileSync(`/workspace/${overlayRel}`, "utf8")
+				.readFileSync(path.join(WORKSPACE, overlayRel), "utf8")
 				.trim();
 			if (overlay) systemPrompt += `\n\n${overlay}`;
 		} catch {
 			// Overlay file absent — base SYSTEM_PROMPT is sufficient.
 		}
 	}
-
 	const contextLines: string[] = [];
 	if (containerInput.caller) {
 		contextLines.push(
 			`User: ${containerInput.caller.name} (${containerInput.caller.source})`,
 		);
 	}
-	const activeModel = sdkEnv["ANTHROPIC_MODEL"];
-	if (activeModel) {
-		contextLines.push(`Model: ${activeModel}`);
-	}
-	if (containerInput.effort) {
+	contextLines.push(`Model: ${modelSpec}`);
+	if (containerInput.effort)
 		contextLines.push(`Effort: ${containerInput.effort}`);
-	}
-	if (contextLines.length > 0) {
-		systemPrompt += `\n\nSession context:\n${contextLines.join("\n")}`;
-	}
-
+	systemPrompt += `\n\nSession context:\n${contextLines.join("\n")}`;
 	if (containerInput.isScheduledTask) {
 		systemPrompt +=
 			"\nThis is a scheduled task. Your last text output will be sent to the user on Telegram. If you need a follow-up, make sure to remember what needs following up, as any response to your message will start in a new session.";
 	}
 
-	// Build initial prompt (text + optional images from ContainerInput)
-	let promptText = containerInput.prompt;
-	if (containerInput.isScheduledTask) {
-		promptText = `[SCHEDULED TASK]\n\n${promptText}`;
-	}
-	const pending = drainIpcInput();
-	if (pending.length > 0) {
-		// Append text from pending messages
-		for (const msg of pending) {
-			if (typeof msg.content === "string") {
-				promptText += `\n${msg.content}`;
-			} else {
-				// Extract text blocks from multimodal content
-				for (const block of msg.content) {
-					if (block.type === "text") {
-						promptText += `\n${block.text}`;
-					}
-				}
-			}
-		}
-	}
+	const loadProject =
+		profile?.settingSources === undefined ||
+		profile.settingSources.includes("project");
 
-	// Build initial content (may be multimodal if images were sent with first message)
-	let initialContent: MessageContent = buildContent(
-		promptText,
-		containerInput.images,
-	);
-
-	// Query loop: run query → wait for IPC message → repeat
-	let resumeAt: string | undefined;
+	let session: AgentSession | undefined;
 	try {
+		const modelRuntime = await ModelRuntime.create({
+			authPath: path.join(AGENT_DIR, "auth.json"),
+			modelsPath: path.join(AGENT_DIR, "models.json"),
+			modelsStorePath: path.join(AGENT_DIR, "models-store.json"),
+		});
+		const model = resolveModel(modelRuntime, modelSpec);
+		await modelRuntime.setRuntimeApiKey(model.provider, apiKey);
+
+		const settingsManager = SettingsManager.inMemory();
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: WORKSPACE,
+			agentDir: AGENT_DIR,
+			settingsManager,
+			systemPromptOverride: () => systemPrompt,
+			extensionFactories: [
+				{ name: "picoclaw-bash", factory: sanitizedBashExtension },
+			],
+			noExtensions: true,
+			additionalSkillPaths: loadProject
+				? [path.join(WORKSPACE, ".claude", "skills")]
+				: [],
+			noSkills: true,
+			noContextFiles: !loadProject,
+			noPromptTemplates: true,
+			noThemes: true,
+			skillsOverride: (current) => ({
+				skills: current.skills.filter((s) => !s.name.startsWith("prism")),
+				diagnostics: current.diagnostics,
+			}),
+		});
+		await resourceLoader.reload();
+		log(
+			`Skills: ${resourceLoader
+				.getSkills()
+				.skills.map((s) => s.name)
+				.join(",")}`,
+		);
+
+		const priorId = profile?.freshSession
+			? undefined
+			: containerInput.sessionId;
+		const priorFile = priorId ? findSessionFile(priorId) : undefined;
+		if (priorId && !priorFile)
+			log(`Session ${priorId} not found, starting fresh`);
+		const sessionManager = priorFile
+			? SessionManager.open(priorFile)
+			: SessionManager.create(WORKSPACE, undefined, undefined);
+
+		const created = await createAgentSession({
+			cwd: WORKSPACE,
+			agentDir: AGENT_DIR,
+			model,
+			...(containerInput.effort
+				? { thinkingLevel: containerInput.effort }
+				: {}),
+			modelRuntime,
+			resourceLoader,
+			settingsManager,
+			sessionManager,
+			tools: TOOLS,
+		});
+		session = created.session;
+		for (const e of created.extensionsResult.errors) {
+			log(`Extension error ${e.path}: ${e.error}`);
+		}
+		log(`Session ${priorFile ? "resumed" : "created"}: ${session.sessionId}`);
+		writeOutput({
+			status: "success",
+			result: null,
+			newSessionId: session.sessionId,
+		});
+
+		let promptText = containerInput.prompt;
+		if (containerInput.isScheduledTask) {
+			promptText = `[SCHEDULED TASK]\n\n${promptText}`;
+		}
+		for (const msg of drainIpcInput()) promptText += `\n${msg.text}`;
+		let content: UserContent = {
+			text: promptText,
+			images: toImages(containerInput.images),
+		};
+
 		while (true) {
-			log(`Starting query (session: ${sessionId || "new"})...`);
-
-			const queryResult = await runQuery(
-				initialContent,
-				sessionId,
-				sdkEnv,
-				systemPrompt,
-				resumeAt,
-				containerInput.effort,
-				profile?.settingSources,
-			);
-			if (queryResult.newSessionId) sessionId = queryResult.newSessionId;
-			if (queryResult.lastAssistantUuid)
-				resumeAt = queryResult.lastAssistantUuid;
-
-			if (queryResult.closedDuringQuery) {
-				log("Close sentinel consumed during query, exiting");
+			log("Starting run...");
+			const result = await runPrompt(session, content);
+			if (result.error) throw new Error(result.error);
+			if (result.closedDuringQuery) {
+				log("Close sentinel consumed during run, exiting");
 				break;
 			}
 
-			// Emit session update
-			writeOutput({ status: "success", result: null, newSessionId: sessionId });
-
-			log("Query ended, waiting for next IPC message...");
-			const nextMessages = await waitForIpcMessage();
-			if (nextMessages === null) {
+			log("Run ended, waiting for next IPC message...");
+			const next = await waitForIpcMessage();
+			if (next === null) {
 				log("Close sentinel received, exiting");
 				break;
 			}
-
-			// Merge all pending messages into a single content payload
-			const [onlyMessage] = nextMessages;
-			if (onlyMessage && nextMessages.length === 1) {
-				initialContent = onlyMessage.content;
-			} else {
-				// Multiple messages: concatenate text, collect images
-				const blocks: ContentBlock[] = [];
-				for (const msg of nextMessages) {
-					if (typeof msg.content === "string") {
-						blocks.push({ type: "text", text: msg.content });
-					} else {
-						blocks.push(...msg.content);
-					}
-				}
-				initialContent = blocks;
-			}
-
-			const preview =
-				typeof initialContent === "string"
-					? `${initialContent.length} chars`
-					: `${initialContent.length} blocks`;
-			log(`Got new message (${preview}), starting new query`);
+			content = mergeContent(next);
+			log(`Got new message (${content.text.length} chars), starting new run`);
 		}
 	} catch (err) {
 		const errorMessage = err instanceof Error ? err.message : String(err);
@@ -593,11 +549,13 @@ async function main(): Promise<void> {
 		writeOutput({
 			status: "error",
 			result: null,
-			newSessionId: sessionId,
+			newSessionId: session?.sessionId,
 			error: errorMessage,
 		});
+		session?.dispose();
 		process.exit(1);
 	}
+	session?.dispose();
 }
 
 main();

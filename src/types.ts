@@ -23,7 +23,7 @@ export interface SessionProfile {
 	/** Workspace-relative path to the system-prompt overlay appended to the base SYSTEM_PROMPT.
 	 *  Omitted → "my-prompt.md". Empty string → no overlay (boot without the operator constitution). */
 	systemPromptOverlay?: string | undefined;
-	/** SDK settingSources. Omitted → ["project", "user"]. Use ["user"] to suppress project CLAUDE.md + project hooks. */
+	/** Omitted → workspace CLAUDE.md + .claude/skills load. Use ["user"] to suppress both. */
 	settingSources?: string[] | undefined;
 	/** Env merged into the in-container SDK env AFTER process.env + secrets, so it overrides them. Used to set
 	 *  PICOCLAW_PERSONA and to redirect the experiential store (e.g. TURSO_URL/TURSO_AUTH_TOKEN to a blank/clone namespace). */
