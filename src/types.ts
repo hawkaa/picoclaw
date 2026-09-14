@@ -37,7 +37,9 @@ export interface ContainerInput {
 	sessionId?: string | undefined;
 	chatId: string;
 	isScheduledTask?: boolean;
-	caller?: { name: string; source: "telegram" | "scheduler" } | undefined;
+	caller?:
+		| { name: string; source: "telegram" | "scheduler" | "slack" }
+		| undefined;
 	secrets?: Record<string, string> | undefined;
 	model?: string | undefined;
 	anthropicApiKey?: string | undefined;
@@ -63,6 +65,10 @@ export interface ContainerState {
 	chatId: string;
 	sessionId?: string | undefined;
 	lastActivity: number;
+	/** When set, agent output goes to this Slack thread instead of Telegram. */
+	slack?: { channel: string; threadTs: string } | undefined;
+	/** Volume to mount when chatId is a Slack runtime id. */
+	workspaceChatId?: string | undefined;
 }
 
 export interface ScheduledTask {

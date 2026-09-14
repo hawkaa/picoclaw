@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { MOONSHOT_PROVIDER, OPENROUTER_PROVIDER } from "./config.ts";
 import {
 	API_KEY_SECRET,
+	dockerContainerName,
 	MODEL_SECRET,
 	readSecrets,
 } from "./container-runner.ts";
@@ -61,5 +62,13 @@ describe("readSecrets", () => {
 		expect(() =>
 			readSecrets("sk-ant-unused", "kimi-k3", MOONSHOT_PROVIDER),
 		).toThrow(/MOONSHOT_API_KEY/);
+	});
+});
+
+describe("dockerContainerName", () => {
+	test("strips characters docker rejects", () => {
+		expect(dockerContainerName("slack:C1:1.2", 9)).toBe(
+			"picoclaw-slack-C1-1.2-9",
+		);
 	});
 });
