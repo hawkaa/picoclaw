@@ -25,6 +25,13 @@ import {
 } from "./container-runner.ts";
 import { startIpcWatcher } from "./ipc.ts";
 import { checkTaskPrecondition } from "./precondition.ts";
+import {
+	parseLeadingModel,
+	type SlackInbound,
+	slackPostMessage,
+	slackRuntimeId,
+	startSlackSocket,
+} from "./slack.ts";
 import { startTaskScheduler } from "./task-scheduler.ts";
 import { TelegramClient, type TelegramUpdate } from "./telegram.ts";
 import type {
@@ -74,6 +81,12 @@ function botConfigForChat(chatId: string): BotConfig | undefined {
 	return configsByUserId.get(chatId);
 }
 
+function primaryWorkspaceId(): string {
+	const id = botConfigs[0]?.allowedUserId;
+	if (!id) throw new Error("no bot configured");
+	return id;
+}
+
 /** Dispatcher: route sendMessage to the correct bot by chatId */
 async function dispatchMessage(
 	chatId: number | string,
@@ -111,6 +124,8 @@ async function dispatchChatAction(
 
 // --- State ---
 const containers = new Map<string, ContainerState>();
+/** Slack replies are posted once per turn, not streamed. */
+const slackAccum = new Map<string, string>();
 const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 // Tracks the timestamp of the last /new reset per chatId.
@@ -206,7 +221,10 @@ function resetIdleTimer(chatId: string): void {
 			const state = containers.get(chatId);
 			if (state) {
 				log.info({ chatId }, "Idle timeout, closing container");
-				writeCloseSentinel(chatId, state.containerName);
+				writeCloseSentinel(
+					state.workspaceChatId ?? chatId,
+					state.containerName,
+				);
 				containers.delete(chatId);
 				stopTyping(chatId);
 				idleTimers.delete(chatId);
@@ -404,6 +422,12 @@ async function handleOutput(
 		}
 	}
 
+	const slackDest = containers.get(chatId)?.slack;
+	if (slackDest && output.type === "text" && output.result) {
+		slackAccum.set(chatId, (slackAccum.get(chatId) ?? "") + output.result);
+		return;
+	}
+
 	// Route text chunks through the streaming path; everything else uses plain send.
 	if (output.type === "text" && output.result) {
 		log.info(
@@ -449,33 +473,42 @@ async function handleOutput(
 async function startContainer(
 	chatId: string,
 	prompt: string,
-	caller?: { name: string; source: "telegram" | "scheduler" } | undefined,
+	caller?:
+		| { name: string; source: "telegram" | "scheduler" | "slack" }
+		| undefined,
 	images?: ImageAttachment[] | undefined,
 	profile?: SessionProfile | undefined,
+	opts?: {
+		workspaceChatId?: string;
+		slack?: { channel: string; threadTs: string };
+		model?: string;
+		effort?: EffortLevel;
+	},
 ): Promise<void> {
 	// Capture spawn time before any async work. Used to detect if /new was called
 	// while this container was running (sessionResets[chatId] > spawnTime).
 	const spawnTime = Date.now();
+	const volumeId = opts?.workspaceChatId ?? chatId;
 
 	// Prepare workspace
-	seedWorkspace(chatId);
-	ensureWorkspaceGit(chatId);
-	ensureSessionsDir(chatId);
-	ensureIpcDirs(chatId);
+	seedWorkspace(volumeId);
+	ensureWorkspaceGit(volumeId);
+	ensureSessionsDir(volumeId);
+	ensureIpcDirs(volumeId);
 
 	// Write tasks snapshot for the container
-	const tasks = readTasks().filter((t) => t.chatId === chatId);
+	const tasks = readTasks().filter((t) => t.chatId === volumeId);
 	writeTasksSnapshot(
-		chatId,
+		volumeId,
 		tasks as unknown as Array<Record<string, unknown>>,
 	);
 
 	const sessions = readSessions();
 	const session = sessions[chatId];
 	const sessionId = session?.sessionId || undefined;
-	const botConfig = botConfigForChat(chatId);
-	const model = session?.model ?? botConfig?.defaultModel;
-	const effort = session?.effort ?? botConfig?.defaultEffort;
+	const botConfig = botConfigForChat(volumeId);
+	const model = opts?.model ?? session?.model ?? botConfig?.defaultModel;
+	const effort = opts?.effort ?? session?.effort ?? botConfig?.defaultEffort;
 	const anthropicApiKey = botConfig?.anthropicApiKey;
 
 	// Issue AgentLair AAT for this session (non-blocking on failure)
@@ -489,14 +522,14 @@ async function startContainer(
 		});
 	}
 
-	await dispatchChatAction(chatId);
+	if (!opts?.slack) await dispatchChatAction(chatId);
 
 	const { proc, containerName, result } = await spawnContainer(
 		chatId,
 		{
 			prompt,
 			sessionId,
-			chatId,
+			chatId: volumeId,
 			caller,
 			model,
 			anthropicApiKey,
@@ -511,6 +544,7 @@ async function startContainer(
 			if (spawnTime <= (sessionResets.get(chatId) ?? 0)) return;
 			await handleOutput(chatId, output);
 		},
+		{ workspaceChatId: volumeId },
 	);
 
 	containers.set(chatId, {
@@ -519,15 +553,32 @@ async function startContainer(
 		chatId,
 		sessionId,
 		lastActivity: Date.now(),
+		slack: opts?.slack,
+		workspaceChatId: volumeId,
 	});
 
-	startTyping(chatId);
+	if (!opts?.slack) startTyping(chatId);
 	resetIdleTimer(chatId);
 
 	// When container exits, clean up
 	result
 		.then(async (finalOutput) => {
+			const slackDest = opts?.slack;
+			const acc = slackAccum.get(chatId);
+			slackAccum.delete(chatId);
 			containers.delete(chatId);
+			if (slackDest && acc && process.env["SLACK_BOT_TOKEN"]) {
+				try {
+					await slackPostMessage(
+						process.env["SLACK_BOT_TOKEN"],
+						slackDest.channel,
+						acc,
+						slackDest.threadTs,
+					);
+				} catch (err) {
+					log.error({ err, chatId }, "Slack reply failed");
+				}
+			}
 			// Flush any in-flight streaming state before stopping the typing indicator.
 			await finalizeStreaming(chatId);
 			stopTyping(chatId);
@@ -818,7 +869,13 @@ async function handleMessage(
 	const state = containers.get(chatId);
 	if (state) {
 		state.lastActivity = Date.now();
-		writeIpcInput(chatId, state.containerName, text, caller, images);
+		writeIpcInput(
+			state.workspaceChatId ?? chatId,
+			state.containerName,
+			text,
+			caller,
+			images,
+		);
 		startTyping(chatId);
 		await client.sendChatAction(chatId);
 		return;
@@ -953,6 +1010,109 @@ async function spawnEphemeral(
 	};
 }
 
+async function handleSlackInbound(msg: SlackInbound): Promise<void> {
+	const runtimeId = slackRuntimeId(msg.channel, msg.threadTs);
+	const parsed = parseLeadingModel(msg.text);
+	const volumeId = primaryWorkspaceId();
+	const caller = { name: msg.user, source: "slack" as const };
+	const slack = { channel: msg.channel, threadTs: msg.threadTs };
+
+	if (parsed.model || parsed.effort) {
+		const sessions = readSessions();
+		sessions[runtimeId] = {
+			sessionId: "",
+			lastActivity: new Date().toISOString(),
+			model: parsed.model,
+			effort: parsed.effort,
+		};
+		writeSessions(sessions);
+		const existing = containers.get(runtimeId);
+		if (existing) {
+			writeCloseSentinel(
+				existing.workspaceChatId ?? runtimeId,
+				existing.containerName,
+			);
+			containers.delete(runtimeId);
+		}
+	}
+
+	const prompt = parsed.rest || (parsed.model || parsed.effort ? "" : msg.text);
+	if (!prompt) {
+		const token = process.env["SLACK_BOT_TOKEN"];
+		if (token) {
+			const bits = [
+				parsed.model && `Model: ${parsed.model}`,
+				parsed.effort && `Effort: ${parsed.effort}`,
+			]
+				.filter(Boolean)
+				.join(" ");
+			await slackPostMessage(
+				token,
+				msg.channel,
+				`Session reset. ${bits}`.trim(),
+				msg.threadTs,
+			);
+		}
+		return;
+	}
+
+	const state = containers.get(runtimeId);
+	if (state) {
+		state.lastActivity = Date.now();
+		writeIpcInput(
+			state.workspaceChatId ?? volumeId,
+			state.containerName,
+			prompt,
+			caller,
+		);
+		resetIdleTimer(runtimeId);
+		return;
+	}
+
+	await startContainer(runtimeId, prompt, caller, undefined, undefined, {
+		workspaceChatId: volumeId,
+		slack,
+		...(parsed.model ? { model: parsed.model } : {}),
+		...(parsed.effort ? { effort: parsed.effort } : {}),
+	});
+}
+
+async function startSlackIfConfigured(): Promise<void> {
+	const botToken = process.env["SLACK_BOT_TOKEN"];
+	const appToken = process.env["SLACK_APP_TOKEN"];
+	if (!botToken || !appToken) {
+		log.info(
+			"Slack inbound off (set SLACK_BOT_TOKEN and SLACK_APP_TOKEN on the host)",
+		);
+		return;
+	}
+	const authRes = await fetch("https://slack.com/api/auth.test", {
+		method: "POST",
+		headers: { Authorization: `Bearer ${botToken}` },
+	});
+	const auth = (await authRes.json()) as {
+		ok: boolean;
+		error?: string;
+		bot_id?: string;
+		user_id?: string;
+	};
+	if (!auth.ok || !auth.bot_id || !auth.user_id) {
+		log.error({ error: auth.error }, "Slack auth.test failed — inbound off");
+		return;
+	}
+	log.info(
+		{ bot: auth.bot_id },
+		"Slack inbound on — any workspace member can talk to Pico",
+	);
+	await startSlackSocket({
+		botToken,
+		appToken,
+		selfBotId: auth.bot_id,
+		selfUserId: auth.user_id,
+		onMessage: handleSlackInbound,
+	});
+}
+
 // --- Polling loop per bot ---
 async function pollBot(client: TelegramClient): Promise<void> {
 	let offset: number | undefined;
@@ -1030,9 +1190,9 @@ async function main(): Promise<void> {
 		audit.registerBot(cfg.name, cfg.agentlairApiKey);
 	}
 
-	// Start parallel polling loops (one per bot)
+	// Start parallel polling loops (one per bot) + optional Slack Socket Mode
 	const pollers = clients.map((client) => pollBot(client));
-	await Promise.all(pollers);
+	await Promise.all([...pollers, startSlackIfConfigured()]);
 }
 
 // Graceful shutdown
@@ -1040,7 +1200,7 @@ function shutdown(): void {
 	log.info("Shutting down...");
 	for (const [chatId, state] of containers) {
 		log.info({ chatId }, "Closing container");
-		writeCloseSentinel(chatId, state.containerName);
+		writeCloseSentinel(state.workspaceChatId ?? chatId, state.containerName);
 	}
 	// Give containers a moment to exit
 	setTimeout(() => process.exit(0), 3000);

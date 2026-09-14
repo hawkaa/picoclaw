@@ -246,19 +246,27 @@ export async function cleanupOrphanedContainers(): Promise<void> {
 	});
 }
 
+/** Docker --name charset. Slack runtime ids can contain colons. */
+export function dockerContainerName(chatId: string, now: number): string {
+	const safe = chatId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 60);
+	return `picoclaw-${safe || "x"}-${now}`;
+}
+
 export async function spawnContainer(
 	chatId: string,
 	input: ContainerInput,
 	onOutput?: (output: ContainerOutput) => Promise<void>,
+	opts?: { workspaceChatId?: string },
 ): Promise<{
 	proc: ChildProcess;
 	containerName: string;
 	result: Promise<ContainerOutput>;
 }> {
-	const image = await resolveImage(chatId);
-	const base = chatDir(chatId);
+	const volumeId = opts?.workspaceChatId ?? chatId;
+	const image = await resolveImage(volumeId);
+	const base = chatDir(volumeId);
 	const now = Date.now();
-	const containerName = `picoclaw-${chatId}-${now}`;
+	const containerName = dockerContainerName(chatId, now);
 
 	// Per-session log file (renamed to include session ID once known)
 	const logsDir = path.join(base, "logs");
