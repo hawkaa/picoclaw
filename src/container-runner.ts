@@ -21,6 +21,7 @@ import {
 import type {
 	ContainerInput,
 	ContainerOutput,
+	EffortLevel,
 	ImageAttachment,
 } from "./types.ts";
 import { ensureXaiAccessToken } from "./xai-oauth.ts";
@@ -85,6 +86,26 @@ export function readSecrets(
 		[MODEL_SECRET]: `${provider.id}/${model}`,
 		[API_KEY_SECRET]: providerKey,
 	};
+}
+
+/** Resolve alias → pi `provider/model` spec and the credential that provider needs. */
+export async function secretsForModel(
+	alias: string,
+	anthropicApiKey: string,
+): Promise<{ modelSpec: string; apiKey: string }> {
+	const target = resolveModelTarget(alias);
+	let provider = target.provider;
+	if (provider?.id === "xai") {
+		const live = await ensureXaiAccessToken(CONTAINER_TIMEOUT);
+		if (live) provider = { ...provider, resolveKey: () => live };
+	}
+	const secrets = readSecrets(anthropicApiKey, target.model, provider);
+	const modelSpec = secrets[MODEL_SECRET];
+	const apiKey = secrets[API_KEY_SECRET];
+	if (!modelSpec || !apiKey) {
+		throw new Error(`secretsForModel(${alias}): empty credential`);
+	}
+	return { modelSpec, apiKey };
 }
 
 /**
@@ -515,6 +536,26 @@ export function writeIpcInput(
 	const payload: Record<string, unknown> = { type: "message", text };
 	if (from) payload["from"] = from;
 	if (images && images.length > 0) payload["images"] = images;
+	fs.writeFileSync(path.join(inputDir, filename), JSON.stringify(payload));
+}
+
+/** Ask a live runner to setModel / setThinkingLevel. Does not restart the container. */
+export function writeIpcSwitch(
+	chatId: string,
+	containerName: string,
+	switchTo: {
+		modelSpec?: string | undefined;
+		apiKey?: string | undefined;
+		effort?: EffortLevel | undefined;
+	},
+): void {
+	const inputDir = path.join(chatDir(chatId), "ipc", "input", containerName);
+	mkdirAll(inputDir);
+	const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
+	const payload: Record<string, unknown> = { type: "switch" };
+	if (switchTo.modelSpec) payload["model"] = switchTo.modelSpec;
+	if (switchTo.apiKey) payload["apiKey"] = switchTo.apiKey;
+	if (switchTo.effort) payload["effort"] = switchTo.effort;
 	fs.writeFileSync(path.join(inputDir, filename), JSON.stringify(payload));
 }
 

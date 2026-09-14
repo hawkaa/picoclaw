@@ -2,15 +2,25 @@
  * Slack inbound for PicoClaw. Socket Mode on the HOST (same place as Telegram
  * polling). Tokens from env, never bots.json, never the container.
  *
- * Thread_ts is the unit of context: one Slack thread → one agent session.
- * The workspace volume is the operator's existing chat, not a new empty disk.
+ * Channel @pico mention → new thread → one agent session. Thread replies
+ * continue that session (no re-tag). Volume is the operator's existing chat.
+ *
+ * Leading space before `/` avoids Slack slash-command intercept:
+ * ` /new grok xhigh` starts a new container; ` /switch grok xhigh` keeps
+ * this container and session and changes the model. `@pico grok xhigh …`
+ * on the mention line also selects model for a new thread.
  */
 import pino from "pino";
 
-import { parseEffortLevel } from "./config.ts";
+import { MODEL_ALIASES, parseEffortLevel } from "./config.ts";
 import type { EffortLevel } from "./types.ts";
 
 const log = pino({ name: "slack" });
+
+/** assistant.threads.setStatus times out after ~2 min; refresh under that. */
+export const SLACK_STATUS_INTERVAL_MS = 60_000;
+
+const SELF_MENTION_RE = /<@([UW][A-Z0-9]+)(?:\|[^>]+)?>/g;
 
 export type SlackInbound = {
 	channel: string;
@@ -20,6 +30,9 @@ export type SlackInbound = {
 	/** Parent ts when unthreaded; thread_ts when a reply. */
 	threadTs: string;
 	isDm: boolean;
+	/** True when this event is a reply inside an existing thread. */
+	isThreadReply: boolean;
+	selfUserId: string;
 };
 
 export function slackRuntimeId(channel: string, threadTs: string): string {
@@ -32,29 +45,75 @@ export function dockerSafeId(id: string): string {
 	return s.slice(0, 80) || "x";
 }
 
-export function parseLeadingModel(text: string): {
-	model?: string;
-	effort?: EffortLevel;
+export function mentionedSelf(text: string, selfUserId: string): boolean {
+	return text.includes(`<@${selfUserId}>`) || text.includes(`<@${selfUserId}|`);
+}
+
+export function stripSelfMentions(text: string, selfUserId: string): string {
+	return text
+		.replace(SELF_MENTION_RE, (full, id: string) =>
+			id === selfUserId ? " " : full,
+		)
+		.replace(/[ \t]+/g, " ")
+		.trim();
+}
+
+export type SlackCommand = "new" | "switch";
+
+/**
+ * Strip @pico, detect `/new` or `/switch`, then consume leading model/effort
+ * aliases. Remaining text is the prompt.
+ */
+export function parseSlackPrompt(
+	text: string,
+	selfUserId?: string,
+): {
+	command?: SlackCommand | undefined;
+	model?: string | undefined;
+	effort?: EffortLevel | undefined;
 	rest: string;
 } {
-	const lines = text.split("\n");
-	const first = lines[0]?.trim() ?? "";
-	if (!first.startsWith("/new")) {
-		return { rest: text };
+	let body = (selfUserId ? stripSelfMentions(text, selfUserId) : text).trim();
+	let command: SlackCommand | undefined;
+	if (/^\/new\b/i.test(body)) {
+		command = "new";
+		body = body.replace(/^\/new\b/i, "").trim();
+	} else if (/^\/switch\b/i.test(body)) {
+		command = "switch";
+		body = body.replace(/^\/switch\b/i, "").trim();
 	}
-	const args = first.slice("/new".length).trim().split(/\s+/).filter(Boolean);
-	const out: { model?: string; effort?: EffortLevel; rest: string } = {
-		rest: lines.slice(1).join("\n").trim(),
-	};
-	for (const arg of args) {
-		const parsed = parseEffortLevel(arg);
-		if (parsed) {
-			out.effort = parsed;
+	const lines = body.split("\n");
+	const first = lines[0] ?? "";
+	const tokens = first.split(/\s+/).filter(Boolean);
+	let model: string | undefined;
+	let effort: EffortLevel | undefined;
+	let i = 0;
+	const commandExplicit = command !== undefined;
+	while (i < tokens.length) {
+		const tok = tokens[i];
+		if (!tok) break;
+		const parsed = parseEffortLevel(tok);
+		if (
+			parsed &&
+			(commandExplicit || model || parsed === "xhigh" || parsed === "max")
+		) {
+			effort = parsed;
+			i++;
 			continue;
 		}
-		if (!out.model) out.model = arg;
+		if (
+			!model &&
+			(MODEL_ALIASES[tok.toLowerCase()] !== undefined || tok.includes("/"))
+		) {
+			model = tok.toLowerCase();
+			i++;
+			continue;
+		}
+		break;
 	}
-	return out;
+	const restFirst = tokens.slice(i).join(" ");
+	const rest = [restFirst, ...lines.slice(1)].join("\n").trim();
+	return { command, model, effort, rest };
 }
 
 export function shouldIgnoreSlackEvent(
@@ -64,15 +123,30 @@ export function shouldIgnoreSlackEvent(
 		bot_id?: string;
 		user?: string;
 		text?: string;
+		thread_ts?: string;
+		ts?: string;
+		channel?: string;
 	},
 	selfBotId: string,
 	selfUserId: string,
 ): boolean {
-	if (event.type !== "message") return true;
+	if (event.type !== "message" && event.type !== "app_mention") return true;
 	if (event.subtype && event.subtype !== "bot_message") return true;
 	if (event.bot_id && event.bot_id === selfBotId) return true;
 	if (event.user && event.user === selfUserId) return true;
 	if (!event.text?.trim()) return true;
+	const isDm = (event.channel ?? "").startsWith("D");
+	const isThreadReply = Boolean(
+		event.thread_ts && event.ts && event.thread_ts !== event.ts,
+	);
+	if (
+		!isDm &&
+		!isThreadReply &&
+		!mentionedSelf(event.text, selfUserId) &&
+		event.type !== "app_mention"
+	) {
+		return true;
+	}
 	return false;
 }
 
@@ -106,7 +180,51 @@ export async function slackPostMessage(
 	}
 }
 
+/**
+ * Slack AI "is thinking…" indicator. Auto-clears when we post a reply.
+ * Empty status clears without posting. Best-effort — never throws.
+ */
+export async function slackSetStatus(
+	botToken: string,
+	channel: string,
+	threadTs: string,
+	status: string,
+): Promise<void> {
+	const res = await fetch("https://slack.com/api/assistant.threads.setStatus", {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${botToken}`,
+			"Content-Type": "application/json; charset=utf-8",
+		},
+		body: JSON.stringify({
+			channel_id: channel,
+			thread_ts: threadTs,
+			status,
+		}),
+	});
+	const data = (await res.json()) as { ok: boolean; error?: string };
+	if (!data.ok) {
+		log.warn({ error: data.error, channel }, "slack setStatus failed");
+	}
+}
+
 type SlackHandler = (msg: SlackInbound) => Promise<void>;
+
+/** Dedup app_mention + message for the same channel+ts. */
+const recentEvents = new Map<string, number>();
+
+function alreadySeen(channel: string, ts: string): boolean {
+	const now = Date.now();
+	const key = `${channel}:${ts}`;
+	if (recentEvents.has(key)) return true;
+	recentEvents.set(key, now);
+	if (recentEvents.size > 500) {
+		for (const [k, t] of recentEvents) {
+			if (now - t > 60_000) recentEvents.delete(k);
+		}
+	}
+	return false;
+}
 
 /**
  * Long-running Socket Mode loop. Mirrors pollBot: retry on failure, never
@@ -125,7 +243,9 @@ export async function startSlackSocket(opts: {
 			await runOneConnection(opts);
 		} catch (err) {
 			log.error({ err }, "Slack socket error, retrying in 5s");
-			await new Promise((r) => setTimeout(r, 5000));
+			const wait = Promise.withResolvers<void>();
+			setTimeout(wait.resolve, 5000);
+			await wait.promise;
 		}
 	}
 }
@@ -151,19 +271,19 @@ async function runOneConnection(opts: {
 	}
 
 	const ws = new WebSocket(body.url);
-	await new Promise<void>((resolve, reject) => {
-		ws.addEventListener("open", () => resolve(), { once: true });
-		ws.addEventListener("error", () => reject(new Error("ws error")), {
-			once: true,
-		});
+	const openedWs = Promise.withResolvers<void>();
+	ws.addEventListener("open", () => openedWs.resolve(), { once: true });
+	ws.addEventListener("error", () => openedWs.reject(new Error("ws error")), {
+		once: true,
 	});
+	await openedWs.promise;
 
-	await new Promise<void>((resolve) => {
-		ws.addEventListener("close", () => resolve());
-		ws.addEventListener("message", (ev) => {
-			void handleSocketFrame(String(ev.data), ws, opts);
-		});
+	const closed = Promise.withResolvers<void>();
+	ws.addEventListener("close", () => closed.resolve());
+	ws.addEventListener("message", (ev) => {
+		void handleSocketFrame(String(ev.data), ws, opts);
 	});
+	await closed.promise;
 }
 
 async function handleSocketFrame(
@@ -197,6 +317,7 @@ async function handleSocketFrame(
 	const ts = event["ts"];
 	const text = event["text"];
 	if (!channel || !ts || !text) return;
+	if (alreadySeen(channel, ts)) return;
 	const threadTs = event["thread_ts"] || ts;
 	const msg: SlackInbound = {
 		channel,
@@ -205,6 +326,8 @@ async function handleSocketFrame(
 		ts,
 		threadTs,
 		isDm: channel.startsWith("D"),
+		isThreadReply: Boolean(event["thread_ts"] && event["thread_ts"] !== ts),
+		selfUserId: opts.selfUserId,
 	};
 	try {
 		await opts.onMessage(msg);

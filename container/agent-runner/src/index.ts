@@ -157,7 +157,17 @@ function shouldClose(): boolean {
 	return false;
 }
 
-function drainIpcInput(): UserContent[] {
+type SwitchEvent = {
+	kind: "switch";
+	modelSpec?: string | undefined;
+	apiKey?: string | undefined;
+	effort?: EffortLevel | undefined;
+};
+type IpcEvent = { kind: "message"; content: UserContent } | SwitchEvent;
+
+const pendingSwitches: SwitchEvent[] = [];
+
+function drainIpcEvents(): IpcEvent[] {
 	try {
 		fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
 		const files = fs
@@ -165,23 +175,41 @@ function drainIpcInput(): UserContent[] {
 			.filter((f) => f.endsWith(".json"))
 			.sort();
 
-		const messages: UserContent[] = [];
+		const events: IpcEvent[] = [];
 		for (const file of files) {
 			const filePath = path.join(IPC_INPUT_DIR, file);
 			try {
-				const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+				const data = JSON.parse(fs.readFileSync(filePath, "utf-8")) as {
+					type?: string;
+					text?: string;
+					from?: { name: string; source: string };
+					images?: ImageAttachment[];
+					model?: string;
+					apiKey?: string;
+					effort?: EffortLevel;
+				};
 				fs.unlinkSync(filePath);
+				if (data.type === "switch") {
+					events.push({
+						kind: "switch",
+						modelSpec: data.model,
+						apiKey: data.apiKey,
+						effort: data.effort,
+					});
+					continue;
+				}
 				if (data.type === "message") {
-					const from = data.from as
-						| { name: string; source: string }
-						| undefined;
+					const from = data.from;
 					const rawText = data.text || "";
 					const text = from
 						? `[${from.name} via ${from.source}] ${rawText}`
 						: rawText;
-					messages.push({
-						text,
-						images: toImages(data.images as ImageAttachment[] | undefined),
+					events.push({
+						kind: "message",
+						content: {
+							text,
+							images: toImages(data.images),
+						},
 					});
 				}
 			} catch (err) {
@@ -193,23 +221,63 @@ function drainIpcInput(): UserContent[] {
 				} catch {}
 			}
 		}
-		return messages;
+		return events;
 	} catch (err) {
 		log(`IPC drain error: ${err instanceof Error ? err.message : String(err)}`);
 		return [];
 	}
 }
 
-function waitForIpcMessage(): Promise<UserContent[] | null> {
-	const { promise, resolve } = Promise.withResolvers<UserContent[] | null>();
+function takeMessages(events: IpcEvent[]): UserContent[] {
+	const messages: UserContent[] = [];
+	for (const event of events) {
+		if (event.kind === "message") messages.push(event.content);
+		else pendingSwitches.push(event);
+	}
+	return messages;
+}
+
+async function flushSwitches(
+	session: AgentSession,
+	modelRuntime: ModelRuntime,
+): Promise<void> {
+	const batch = pendingSwitches.splice(0);
+	for (const ev of batch) {
+		try {
+			if (ev.modelSpec && ev.apiKey) {
+				const model = resolveModel(modelRuntime, ev.modelSpec);
+				await modelRuntime.setRuntimeApiKey(model.provider, ev.apiKey);
+				await session.setModel(model);
+				log(`Switched model to ${ev.modelSpec}`);
+			}
+			if (ev.effort) {
+				session.setThinkingLevel(ev.effort);
+				log(`Switched effort to ${ev.effort}`);
+			}
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			log(`Switch failed: ${message}`);
+			writeOutput({
+				status: "success",
+				result: `Switch failed: ${message}`,
+				type: "text",
+			});
+		}
+	}
+}
+
+function waitForIpcMessage(): Promise<{ messages: UserContent[] } | null> {
+	const { promise, resolve } = Promise.withResolvers<{
+		messages: UserContent[];
+	} | null>();
 	const poll = () => {
 		if (shouldClose()) {
 			resolve(null);
 			return;
 		}
-		const messages = drainIpcInput();
-		if (messages.length > 0) {
-			resolve(messages);
+		const messages = takeMessages(drainIpcEvents());
+		if (messages.length > 0 || pendingSwitches.length > 0) {
+			resolve({ messages });
 			return;
 		}
 		setTimeout(poll, IPC_POLL_MS);
@@ -311,7 +379,7 @@ async function runPrompt(
 			void session.abort();
 			return;
 		}
-		const messages = drainIpcInput();
+		const messages = takeMessages(drainIpcEvents());
 		if (messages.length > 0) {
 			const merged = mergeContent(messages);
 			log(`Steering active run with IPC message (${merged.text.length} chars)`);
@@ -530,13 +598,15 @@ async function main(): Promise<void> {
 		if (containerInput.isScheduledTask) {
 			promptText = `[SCHEDULED TASK]\n\n${promptText}`;
 		}
-		for (const msg of drainIpcInput()) promptText += `\n${msg.text}`;
+		const first = takeMessages(drainIpcEvents());
+		for (const msg of first) promptText += `\n${msg.text}`;
 		let content: UserContent = {
 			text: promptText,
 			images: toImages(containerInput.images),
 		};
 
 		while (true) {
+			await flushSwitches(session, modelRuntime);
 			log("Starting run...");
 			const result = await runPrompt(session, content);
 			if (result.error) throw new Error(result.error);
@@ -544,14 +614,19 @@ async function main(): Promise<void> {
 				log("Close sentinel consumed during run, exiting");
 				break;
 			}
+			await flushSwitches(session, modelRuntime);
 
 			log("Run ended, waiting for next IPC message...");
-			const next = await waitForIpcMessage();
+			let next = await waitForIpcMessage();
+			while (next !== null && next.messages.length === 0) {
+				await flushSwitches(session, modelRuntime);
+				next = await waitForIpcMessage();
+			}
 			if (next === null) {
 				log("Close sentinel received, exiting");
 				break;
 			}
-			content = mergeContent(next);
+			content = mergeContent(next.messages);
 			log(`Got new message (${content.text.length} chars), starting new run`);
 		}
 	} catch (err) {
