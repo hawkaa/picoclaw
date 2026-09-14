@@ -55,7 +55,7 @@ Reference: `memory/knowledge/picoclaw-architecture.md` (inside the workspace).
 3. Start the host: `bun run start`
 4. Create a Telegram bot, set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 
-Optional Slack inbound (host env, never the container): `SLACK_BOT_TOKEN` (`xoxb-`) and `SLACK_APP_TOKEN` (`xapp-`, Socket Mode). Any member of that Slack workspace can talk to Pico. One Slack thread is one agent session (`fresh` per `thread_ts`) on the operator's existing `/workspace` — not a new disk. First line `/new grok xhigh` selects model. Replies go back into the thread.
+Optional Slack inbound (host env, never the container): `SLACK_BOT_TOKEN` (`xoxb-`) and `SLACK_APP_TOKEN` (`xapp-`, Socket Mode). `@pico` in a channel opens a new thread (one thread = one session) on the operator's existing `/workspace`. Thread replies continue that session. `@pico grok xhigh what's the weather` selects model on the mention line. Prefix a space so Slack does not eat slash commands: ` /new grok xhigh` starts a new container; ` /switch grok xhigh` keeps this container and session and changes the model (pi `setModel`). Pico shows `is thinking…` in the thread while working.
 
 The agent will load `CLAUDE.md` from whatever directory is mounted as `/workspace`.
 

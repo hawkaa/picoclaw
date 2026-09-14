@@ -16,21 +16,26 @@ import {
 	cleanupOrphanedContainers,
 	ensureIpcDirs,
 	ensureSessionsDir,
+	secretsForModel,
 	seedWorkspace,
 	spawnContainer,
 	workspaceDirFor,
 	writeCloseSentinel,
 	writeIpcInput,
+	writeIpcSwitch,
 	writeTasksSnapshot,
 } from "./container-runner.ts";
 import { startIpcWatcher } from "./ipc.ts";
 import { checkTaskPrecondition } from "./precondition.ts";
 import {
-	parseLeadingModel,
+	parseSlackPrompt,
+	SLACK_STATUS_INTERVAL_MS,
 	type SlackInbound,
 	slackPostMessage,
 	slackRuntimeId,
+	slackSetStatus,
 	startSlackSocket,
+	stripSelfMentions,
 } from "./slack.ts";
 import { startTaskScheduler } from "./task-scheduler.ts";
 import { TelegramClient, type TelegramUpdate } from "./telegram.ts";
@@ -191,16 +196,30 @@ function writeTasks(tasks: ScheduledTask[]): void {
 // --- Session lifecycle ---
 function startTyping(chatId: string): void {
 	stopTyping(chatId);
-	typingIntervals.set(
-		chatId,
-		setInterval(() => {
-			if (containers.has(chatId)) {
-				dispatchChatAction(chatId).catch(() => {});
-			} else {
-				stopTyping(chatId);
+	const slack = containers.get(chatId)?.slack;
+	const intervalMs = slack ? SLACK_STATUS_INTERVAL_MS : TYPING_INTERVAL;
+	const pulse = (): void => {
+		const state = containers.get(chatId);
+		if (!state) {
+			stopTyping(chatId);
+			return;
+		}
+		if (state.slack) {
+			const token = process.env["SLACK_BOT_TOKEN"];
+			if (token) {
+				slackSetStatus(
+					token,
+					state.slack.channel,
+					state.slack.threadTs,
+					"is thinking...",
+				).catch(() => {});
 			}
-		}, TYPING_INTERVAL),
-	);
+			return;
+		}
+		dispatchChatAction(chatId).catch(() => {});
+	};
+	pulse();
+	typingIntervals.set(chatId, setInterval(pulse, intervalMs));
 }
 
 function stopTyping(chatId: string): void {
@@ -423,8 +442,16 @@ async function handleOutput(
 	}
 
 	const slackDest = containers.get(chatId)?.slack;
-	if (slackDest && output.type === "text" && output.result) {
-		slackAccum.set(chatId, (slackAccum.get(chatId) ?? "") + output.result);
+	if (slackDest) {
+		if (output.type === "text" && output.result) {
+			slackAccum.set(chatId, (slackAccum.get(chatId) ?? "") + output.result);
+		} else if (output.status === "error" && output.error) {
+			slackAccum.set(
+				chatId,
+				`${slackAccum.get(chatId) ?? ""}Agent error: ${output.error}`,
+			);
+		}
+		resetIdleTimer(chatId);
 		return;
 	}
 
@@ -557,7 +584,7 @@ async function startContainer(
 		workspaceChatId: volumeId,
 	});
 
-	if (!opts?.slack) startTyping(chatId);
+	startTyping(chatId);
 	resetIdleTimer(chatId);
 
 	// When container exits, clean up
@@ -567,14 +594,23 @@ async function startContainer(
 			const acc = slackAccum.get(chatId);
 			slackAccum.delete(chatId);
 			containers.delete(chatId);
-			if (slackDest && acc && process.env["SLACK_BOT_TOKEN"]) {
+			if (slackDest && process.env["SLACK_BOT_TOKEN"]) {
 				try {
-					await slackPostMessage(
-						process.env["SLACK_BOT_TOKEN"],
-						slackDest.channel,
-						acc,
-						slackDest.threadTs,
-					);
+					if (acc) {
+						await slackPostMessage(
+							process.env["SLACK_BOT_TOKEN"],
+							slackDest.channel,
+							acc,
+							slackDest.threadTs,
+						);
+					} else {
+						await slackSetStatus(
+							process.env["SLACK_BOT_TOKEN"],
+							slackDest.channel,
+							slackDest.threadTs,
+							"",
+						);
+					}
 				} catch (err) {
 					log.error({ err, chatId }, "Slack reply failed");
 				}
@@ -648,7 +684,7 @@ async function startContainer(
 				});
 			}
 
-			commitWorkspace(chatId, {
+			commitWorkspace(volumeId, {
 				containerName,
 				caller,
 				prompt,
@@ -862,6 +898,47 @@ async function handleMessage(
 		return;
 	}
 
+	if (text === "/switch" || text.startsWith("/switch ")) {
+		const parsed = parseSlackPrompt(text);
+		const model = parsed.model;
+		const effort = parsed.effort;
+		if (!model && !effort) {
+			await client.sendMessage(chatId, "Usage: /switch grok xhigh");
+			return;
+		}
+		const sessions = readSessions();
+		const existing = sessions[chatId];
+		sessions[chatId] = {
+			sessionId: existing?.sessionId ?? "",
+			lastActivity: new Date().toISOString(),
+			model: model ?? existing?.model,
+			effort: effort ?? existing?.effort,
+		};
+		writeSessions(sessions);
+		const live = containers.get(chatId);
+		if (live) {
+			try {
+				await switchLiveContainer(
+					live,
+					live.workspaceChatId ?? chatId,
+					model,
+					effort,
+				);
+			} catch (err) {
+				await client.sendMessage(
+					chatId,
+					`Switch failed: ${err instanceof Error ? err.message : String(err)}`,
+				);
+				return;
+			}
+		}
+		const bits = [model && `Model: ${model}`, effort && `Effort: ${effort}`]
+			.filter(Boolean)
+			.join(" ");
+		await client.sendMessage(chatId, `Switched. ${bits}`.trim());
+		return;
+	}
+
 	const callerName = msg.from.username ?? msg.from.first_name ?? "unknown";
 	const caller = { name: callerName, source: "telegram" as const };
 
@@ -1010,22 +1087,74 @@ async function spawnEphemeral(
 	};
 }
 
+async function switchLiveContainer(
+	state: ContainerState,
+	volumeId: string,
+	model: string | undefined,
+	effort: EffortLevel | undefined,
+): Promise<void> {
+	const botConfig = botConfigForChat(volumeId);
+	const payload: {
+		modelSpec?: string;
+		apiKey?: string;
+		effort?: EffortLevel;
+	} = {};
+	if (model) {
+		const key = botConfig?.anthropicApiKey;
+		if (!key) throw new Error("no bot key for model switch");
+		const secrets = await secretsForModel(model, key);
+		payload.modelSpec = secrets.modelSpec;
+		payload.apiKey = secrets.apiKey;
+	}
+	if (effort) payload.effort = effort;
+	writeIpcSwitch(
+		state.workspaceChatId ?? volumeId,
+		state.containerName,
+		payload,
+	);
+}
+
+function persistSlackSession(
+	runtimeId: string,
+	opts: {
+		sessionId?: string | undefined;
+		model?: string | undefined;
+		effort?: EffortLevel | undefined;
+		clearSession?: boolean;
+	},
+): void {
+	const sessions = readSessions();
+	const existing = sessions[runtimeId];
+	sessions[runtimeId] = {
+		sessionId: opts.clearSession
+			? ""
+			: (opts.sessionId ?? existing?.sessionId ?? ""),
+		lastActivity: new Date().toISOString(),
+		model: opts.model ?? existing?.model,
+		effort: opts.effort ?? existing?.effort,
+	};
+	writeSessions(sessions);
+}
+
 async function handleSlackInbound(msg: SlackInbound): Promise<void> {
 	const runtimeId = slackRuntimeId(msg.channel, msg.threadTs);
-	const parsed = parseLeadingModel(msg.text);
+	const parsed = parseSlackPrompt(msg.text, msg.selfUserId);
+	const command = parsed.command;
+	let model = parsed.model;
+	let effort = parsed.effort;
+	let rest = parsed.rest;
+	if (msg.isThreadReply && !command) {
+		rest = stripSelfMentions(msg.text, msg.selfUserId);
+		model = undefined;
+		effort = undefined;
+	}
 	const volumeId = primaryWorkspaceId();
 	const caller = { name: msg.user, source: "slack" as const };
 	const slack = { channel: msg.channel, threadTs: msg.threadTs };
+	const token = process.env["SLACK_BOT_TOKEN"];
 
-	if (parsed.model || parsed.effort) {
-		const sessions = readSessions();
-		sessions[runtimeId] = {
-			sessionId: "",
-			lastActivity: new Date().toISOString(),
-			model: parsed.model,
-			effort: parsed.effort,
-		};
-		writeSessions(sessions);
+	if (command === "new") {
+		sessionResets.set(runtimeId, Date.now());
 		const existing = containers.get(runtimeId);
 		if (existing) {
 			writeCloseSentinel(
@@ -1033,27 +1162,101 @@ async function handleSlackInbound(msg: SlackInbound): Promise<void> {
 				existing.containerName,
 			);
 			containers.delete(runtimeId);
+			stopTyping(runtimeId);
 		}
-	}
-
-	const prompt = parsed.rest || (parsed.model || parsed.effort ? "" : msg.text);
-	if (!prompt) {
-		const token = process.env["SLACK_BOT_TOKEN"];
-		if (token) {
-			const bits = [
-				parsed.model && `Model: ${parsed.model}`,
-				parsed.effort && `Effort: ${parsed.effort}`,
-			]
+		persistSlackSession(runtimeId, { model, effort, clearSession: true });
+		if (!rest) {
+			const bits = [model && `Model: ${model}`, effort && `Effort: ${effort}`]
 				.filter(Boolean)
 				.join(" ");
-			await slackPostMessage(
-				token,
-				msg.channel,
-				`Session reset. ${bits}`.trim(),
-				msg.threadTs,
-			);
+			if (token) {
+				await slackPostMessage(
+					token,
+					msg.channel,
+					`Session reset. ${bits}`.trim(),
+					msg.threadTs,
+				);
+			}
+			return;
 		}
-		return;
+	} else if (command === "switch") {
+		if (!model && !effort) {
+			if (token) {
+				await slackPostMessage(
+					token,
+					msg.channel,
+					"Usage: /switch grok xhigh",
+					msg.threadTs,
+				);
+			}
+			return;
+		}
+		persistSlackSession(runtimeId, { model, effort });
+		const state = containers.get(runtimeId);
+		if (state) {
+			try {
+				await switchLiveContainer(state, volumeId, model, effort);
+			} catch (err) {
+				log.error({ err, runtimeId }, "Slack /switch failed");
+				if (token) {
+					await slackPostMessage(
+						token,
+						msg.channel,
+						`Switch failed: ${err instanceof Error ? err.message : String(err)}`,
+						msg.threadTs,
+					);
+				}
+				return;
+			}
+			if (!rest) {
+				const bits = [model && `Model: ${model}`, effort && `Effort: ${effort}`]
+					.filter(Boolean)
+					.join(" ");
+				if (token) {
+					await slackPostMessage(
+						token,
+						msg.channel,
+						`Switched. ${bits}`.trim(),
+						msg.threadTs,
+					);
+				}
+				return;
+			}
+			writeIpcInput(
+				state.workspaceChatId ?? volumeId,
+				state.containerName,
+				rest,
+				caller,
+			);
+			startTyping(runtimeId);
+			resetIdleTimer(runtimeId);
+			return;
+		}
+		if (!rest) {
+			const bits = [model && `Model: ${model}`, effort && `Effort: ${effort}`]
+				.filter(Boolean)
+				.join(" ");
+			if (token) {
+				await slackPostMessage(
+					token,
+					msg.channel,
+					`Switched. ${bits}`.trim(),
+					msg.threadTs,
+				);
+			}
+			return;
+		}
+	} else if (!msg.isThreadReply && (model || effort)) {
+		persistSlackSession(runtimeId, { model, effort, clearSession: true });
+	}
+
+	const prompt = rest;
+	if (!prompt) return;
+
+	if (token) {
+		slackSetStatus(token, msg.channel, msg.threadTs, "is thinking...").catch(
+			() => {},
+		);
 	}
 
 	const state = containers.get(runtimeId);
@@ -1065,6 +1268,7 @@ async function handleSlackInbound(msg: SlackInbound): Promise<void> {
 			prompt,
 			caller,
 		);
+		startTyping(runtimeId);
 		resetIdleTimer(runtimeId);
 		return;
 	}
@@ -1072,8 +1276,8 @@ async function handleSlackInbound(msg: SlackInbound): Promise<void> {
 	await startContainer(runtimeId, prompt, caller, undefined, undefined, {
 		workspaceChatId: volumeId,
 		slack,
-		...(parsed.model ? { model: parsed.model } : {}),
-		...(parsed.effort ? { effort: parsed.effort } : {}),
+		...(model ? { model } : {}),
+		...(effort ? { effort } : {}),
 	});
 }
 
