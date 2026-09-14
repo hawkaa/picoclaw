@@ -230,6 +230,23 @@ function stopTyping(chatId: string): void {
 	}
 }
 
+async function flushSlackReply(chatId: string): Promise<void> {
+	const dest = containers.get(chatId)?.slack;
+	const token = process.env["SLACK_BOT_TOKEN"];
+	const acc = slackAccum.get(chatId);
+	slackAccum.delete(chatId);
+	if (!dest || !token) return;
+	try {
+		if (acc) {
+			await slackPostMessage(token, dest.channel, acc, dest.threadTs);
+		} else {
+			await slackSetStatus(token, dest.channel, dest.threadTs, "");
+		}
+	} catch (err) {
+		log.error({ err, chatId }, "Slack reply failed");
+	}
+}
+
 function resetIdleTimer(chatId: string): void {
 	const existing = idleTimers.get(chatId);
 	if (existing) clearTimeout(existing);
@@ -244,9 +261,11 @@ function resetIdleTimer(chatId: string): void {
 					state.workspaceChatId ?? chatId,
 					state.containerName,
 				);
-				containers.delete(chatId);
-				stopTyping(chatId);
-				idleTimers.delete(chatId);
+				void flushSlackReply(chatId).finally(() => {
+					containers.delete(chatId);
+					stopTyping(chatId);
+					idleTimers.delete(chatId);
+				});
 			}
 		}, IDLE_TIMEOUT),
 	);
@@ -451,6 +470,10 @@ async function handleOutput(
 				`${slackAccum.get(chatId) ?? ""}Agent error: ${output.error}`,
 			);
 		}
+		if (output.type === "result" || output.status === "error") {
+			await flushSlackReply(chatId);
+			stopTyping(chatId);
+		}
 		resetIdleTimer(chatId);
 		return;
 	}
@@ -590,31 +613,8 @@ async function startContainer(
 	// When container exits, clean up
 	result
 		.then(async (finalOutput) => {
-			const slackDest = opts?.slack;
-			const acc = slackAccum.get(chatId);
-			slackAccum.delete(chatId);
+			await flushSlackReply(chatId);
 			containers.delete(chatId);
-			if (slackDest && process.env["SLACK_BOT_TOKEN"]) {
-				try {
-					if (acc) {
-						await slackPostMessage(
-							process.env["SLACK_BOT_TOKEN"],
-							slackDest.channel,
-							acc,
-							slackDest.threadTs,
-						);
-					} else {
-						await slackSetStatus(
-							process.env["SLACK_BOT_TOKEN"],
-							slackDest.channel,
-							slackDest.threadTs,
-							"",
-						);
-					}
-				} catch (err) {
-					log.error({ err, chatId }, "Slack reply failed");
-				}
-			}
 			// Flush any in-flight streaming state before stopping the typing indicator.
 			await finalizeStreaming(chatId);
 			stopTyping(chatId);
