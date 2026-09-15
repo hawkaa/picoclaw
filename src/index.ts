@@ -5,6 +5,7 @@ import { issueAAT } from "./agentlair-aat.ts";
 import { audit } from "./audit-client.ts";
 import {
 	DATA_DIR,
+	DEFAULT_INTERACTIVE_MODEL,
 	IDLE_TIMEOUT,
 	loadBotConfigs,
 	MODEL_ALIASES,
@@ -557,7 +558,12 @@ async function startContainer(
 	const session = sessions[chatId];
 	const sessionId = session?.sessionId || undefined;
 	const botConfig = botConfigForChat(volumeId);
-	const model = opts?.model ?? session?.model ?? botConfig?.defaultModel;
+	const model =
+		opts?.model ??
+		session?.model ??
+		botConfig?.defaultModel ??
+		process.env["ANTHROPIC_MODEL"] ??
+		DEFAULT_INTERACTIVE_MODEL;
 	const effort = opts?.effort ?? session?.effort ?? botConfig?.defaultEffort;
 	const anthropicApiKey = botConfig?.anthropicApiKey;
 

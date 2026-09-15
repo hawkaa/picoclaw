@@ -8,7 +8,7 @@ import { resolveXaiAccessToken } from "./xai-oauth.ts";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const PROJECT_ROOT = path.resolve(__dirname, "..");
-export const WORKSPACES_DIR = path.join(PROJECT_ROOT, "workspaces");
+export const WORKSPACES_DIR = "/mnt/HC_Volume_105140258/picoclaw/workspaces";
 export const DATA_DIR = path.join(PROJECT_ROOT, "data");
 export const CONTAINER_DIR = path.join(PROJECT_ROOT, "container");
 export const SEEDS_DIR = path.join(CONTAINER_DIR, "seeds");
@@ -76,6 +76,13 @@ export const XAI_PROVIDER: ProviderConfig = {
 
 /** Used when neither the session, the bot, nor ANTHROPIC_MODEL names a model. */
 export const DEFAULT_MODEL = "claude-opus-5";
+
+/**
+ * Interactive sessions (Telegram/Slack) default to Grok when neither the
+ * session, the bot config, nor ANTHROPIC_MODEL picks a model. Scheduled
+ * (cron) containers keep DEFAULT_MODEL.
+ */
+export const DEFAULT_INTERACTIVE_MODEL = "grok";
 
 export const MODEL_ALIASES: Record<string, string | ModelTarget> = {
 	fable: "claude-fable-5",
