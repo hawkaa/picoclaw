@@ -45,6 +45,9 @@ export class TelegramClient {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: body ? JSON.stringify(body) : null,
+			// Long-poll getUpdates uses TELEGRAM_POLL_TIMEOUT (30s) server-side;
+			// without a client deadline a stalled socket hangs the poll loop forever.
+			signal: AbortSignal.timeout((TELEGRAM_POLL_TIMEOUT + 30) * 1000),
 		});
 		const json = (await res.json()) as {
 			ok: boolean;
