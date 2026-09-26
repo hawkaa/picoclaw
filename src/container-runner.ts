@@ -161,13 +161,24 @@ export function ensureIpcDirs(chatId: string): void {
 }
 
 /**
- * Check if per-chat image needs rebuild (Dockerfile.extra changed).
+ * Cache key for a per-chat image: Dockerfile.extra content plus the base image
+ * ID it was built FROM. Keying on the extra alone kept per-chat images pinned to
+ * a stale base after `picoclaw-base` was rebuilt (e.g. an agent SDK bump).
  */
-function getDockerfileExtraHash(chatId: string): string | null {
+function getPerChatImageHash(
+	chatId: string,
+	baseImageId: string,
+): string | null {
 	const extraPath = path.join(chatDir(chatId), "workspace", "Dockerfile.extra");
 	if (!fs.existsSync(extraPath)) return null;
 	const content = fs.readFileSync(extraPath, "utf-8");
-	return crypto.createHash("sha256").update(content).digest("hex").slice(0, 16);
+	return crypto
+		.createHash("sha256")
+		.update(baseImageId)
+		.update("\0")
+		.update(content)
+		.digest("hex")
+		.slice(0, 16);
 }
 
 function readImageHashes(): Record<string, string> {
@@ -187,19 +198,61 @@ function writeImageHashes(hashes: Record<string, string>): void {
 		JSON.stringify(hashes, null, 2),
 	);
 }
+/** Resolves the image ID, or null when the image does not exist. */
+function imageId(image: string): Promise<string | null> {
+	const { promise, resolve } = Promise.withResolvers<string | null>();
+	exec(
+		`docker image inspect --format {{.Id}} ${image}`,
+		{ timeout: 30_000 },
+		(err, stdout) => resolve(err ? null : stdout.trim() || null),
+	);
+	return promise;
+}
 
 /**
- * Build per-chat image if Dockerfile.extra exists and changed.
+ * The hash cache in image-hashes.json only proves an image was built once —
+ * not that it still exists (prune, docker reset, disk wipe). A missing image
+ * otherwise fails every container with exit 125 until someone rebuilds by
+ * hand, so verify with docker and rebuild the base when it is gone.
+ * Returns the base image ID.
+ */
+async function ensureBaseImage(): Promise<string> {
+	const existing = await imageId(CONTAINER_BASE_IMAGE);
+	if (existing) return existing;
+	log.warn({ image: CONTAINER_BASE_IMAGE }, "Base image missing, rebuilding");
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	exec(
+		`docker build -t ${CONTAINER_BASE_IMAGE} ${CONTAINER_DIR}`,
+		{ timeout: 1_800_000 },
+		(err, _stdout, stderr) => {
+			if (err) {
+				log.error({ err, stderr }, "Base image build failed");
+				reject(err);
+			} else {
+				resolve();
+			}
+		},
+	);
+	await promise;
+	const built = await imageId(CONTAINER_BASE_IMAGE);
+	if (!built) throw new Error(`${CONTAINER_BASE_IMAGE} missing after build`);
+	return built;
+}
+
+/**
+ * Build per-chat image if Dockerfile.extra or the base image changed.
  * Returns the image name to use.
  */
 export async function resolveImage(chatId: string): Promise<string> {
-	const currentHash = getDockerfileExtraHash(chatId);
+	const baseImageId = await ensureBaseImage();
+	const currentHash = getPerChatImageHash(chatId, baseImageId);
 	if (!currentHash) return CONTAINER_BASE_IMAGE;
 
 	const hashes = readImageHashes();
 	const perChatImage = `picoclaw-${chatId}:latest`;
 
-	if (hashes[chatId] === currentHash) return perChatImage;
+	if (hashes[chatId] === currentHash && (await imageId(perChatImage)))
+		return perChatImage;
 
 	// Build per-chat image
 	const extraContent = fs.readFileSync(
