@@ -78,24 +78,10 @@ const EXCLUDES = [
 	"*.ckpt",
 ];
 
-/** Squash history once the packed object store exceeds this. */
-const COMPACT_THRESHOLD_KIB = 3 * 1024 * 1024; // 3 GiB
-
 function writeExcludes(chatId: string): void {
 	const infoDir = path.join(gitDir(chatId), "info");
 	fs.mkdirSync(infoDir, { recursive: true });
 	fs.writeFileSync(path.join(infoDir, "exclude"), `${EXCLUDES.join("\n")}\n`);
-}
-
-async function objectStoreKiB(chatId: string): Promise<number> {
-	const out = await gitAsync(chatId, ["count-objects", "-v"]);
-	let total = 0;
-	for (const line of out.split("\n")) {
-		const [key, value] = line.split(": ");
-		if (key === "size" || key === "size-pack" || key === "size-garbage")
-			total += Number(value) || 0;
-	}
-	return total;
 }
 
 /**
@@ -182,17 +168,6 @@ export async function commitWorkspace(
 		}
 	} catch (err) {
 		log.warn({ chatId, err }, "Failed to commit workspace");
-		return;
-	}
-
-	try {
-		const kib = await objectStoreKiB(chatId);
-		if (kib > COMPACT_THRESHOLD_KIB) {
-			log.info({ chatId, kib }, "Workspace git over threshold, compacting");
-			await compactHistory(chatId);
-		}
-	} catch (err) {
-		log.warn({ chatId, err }, "Failed to check workspace git size");
 	}
 }
 
@@ -200,8 +175,8 @@ const compacting = new Set<string>();
 
 /**
  * Squash all history into a single commit (re-applying excludes, so already
- * tracked junk is dropped) and garbage-collect. Triggered automatically when
- * the object store exceeds COMPACT_THRESHOLD_KIB.
+ * tracked junk is dropped) and garbage-collect. Destroys history: manual use
+ * only, never wired to an automatic trigger.
  */
 export async function compactHistory(chatId: string): Promise<void> {
 	if (compacting.has(chatId)) return;
