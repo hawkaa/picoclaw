@@ -39,6 +39,7 @@ import {
 	startSlackSocket,
 	stripSelfMentions,
 } from "./slack.ts";
+import { configureSpawnHealth, freeBytesAt } from "./spawn-health.ts";
 import { startTaskScheduler } from "./task-scheduler.ts";
 import { TelegramClient, type TelegramUpdate } from "./telegram.ts";
 import type {
@@ -1400,6 +1401,16 @@ async function main(): Promise<void> {
 
 	// Collect all allowed user IDs
 	const allAllowedUserIds = botConfigs.map((c) => c.allowedUserId);
+
+	// Host-side "fleet is dark" alarm: the containers cannot report their own
+	// failure to boot. Goes to the first bot's owner.
+	const alertChatId = allAllowedUserIds[0];
+	if (alertChatId !== undefined) {
+		configureSpawnHealth({
+			notify: (text) => dispatchMessage(alertChatId, text),
+			freeBytes: () => freeBytesAt(WORKSPACES_DIR),
+		});
+	}
 
 	// Start subsystems
 	startIpcWatcher({

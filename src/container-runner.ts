@@ -18,6 +18,7 @@ import {
 	SEEDS_DIR,
 	WORKSPACES_DIR,
 } from "./config.ts";
+import { recordSessionOutcome } from "./spawn-health.ts";
 import type {
 	ContainerInput,
 	ContainerOutput,
@@ -575,6 +576,8 @@ export async function spawnContainer(
 			});
 		});
 	});
+
+	void result.then(recordSessionOutcome);
 
 	return { proc, containerName, result };
 }

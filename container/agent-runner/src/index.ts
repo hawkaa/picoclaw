@@ -608,7 +608,7 @@ async function main(): Promise<void> {
 			log(`Got new message (${content.text.length} chars), starting new run`);
 		}
 	} catch (err) {
-		const errorMessage = err instanceof Error ? err.message : String(err);
+		const errorMessage = describeError(err);
 		log(`Agent error: ${errorMessage}`);
 		writeOutput({
 			status: "error",
@@ -620,6 +620,20 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 	session?.dispose();
+}
+
+/**
+ * err.message plus every err.cause. pi wraps the real failure (for example
+ * ENOSPC) in CredentialSynchronizationError, whose message hides it.
+ */
+function describeError(err: unknown): string {
+	const parts: string[] = [];
+	let cur: unknown = err;
+	for (let depth = 0; cur !== undefined && cur !== null && depth < 5; depth++) {
+		parts.push(cur instanceof Error ? cur.message : String(cur));
+		cur = cur instanceof Error ? cur.cause : undefined;
+	}
+	return parts.join(" <- caused by: ");
 }
 
 main();
