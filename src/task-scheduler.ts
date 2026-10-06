@@ -167,59 +167,84 @@ function makeSemaphore(limit: number) {
 	return { acquire, release };
 }
 
-export function startTaskScheduler(deps: SchedulerDeps): void {
-	const check = async () => {
-		const tasks = deps.readTasks();
-		const now = new Date();
+/**
+ * One scheduler instance: a tick function plus the state that must survive
+ * across ticks.
+ *
+ * A tick spawns every due task that is not already running and returns
+ * without waiting for them. Each task writes its own status back (fresh read
+ * + `mergeTasks`) when it finishes. Earlier, a tick awaited the whole batch
+ * before the next tick could run, so a 60-90 min session held back every other
+ * due cron and once-task until it exited.
+ *
+ * Concurrent writes: `readTasks`/`writeTasks` are synchronous and every writer
+ * (this scheduler, the IPC watcher) does read-modify-write with no `await` in
+ * between, so on the single JS thread each write is atomic with respect to the
+ * others. `mergeTasks` keeps anything IPC wrote while the task ran.
+ *
+ * `startTaskScheduler` runs it in the production loop.
+ */
+function createTaskScheduler(deps: SchedulerDeps): {
+	tick: () => Promise<Promise<void>[]>;
+	inFlight: ReadonlySet<string>;
+} {
+	const inFlight = new Set<string>();
+	// Shared across ticks, so the bound is on total running sessions.
+	const sem = makeSemaphore(MAX_CONCURRENT_TASKS);
 
-		const dueTasks = tasks.filter(
-			(task) =>
-				task.status === "active" &&
-				task.next_run !== null &&
-				new Date(task.next_run) <= now,
+	const writeBack = (
+		updates: Map<string, { status: ScheduledTask["status"] }>,
+	) => {
+		if (updates.size === 0) return;
+		deps.writeTasks(mergeTasks(deps.readTasks(), updates));
+	};
+
+	const runTask = async (task: ScheduledTask) => {
+		await sem.acquire();
+		log.info(
+			{ taskId: task.id, prompt: task.prompt.slice(0, 80) },
+			"Running scheduled task",
 		);
-
-		if (dueTasks.length === 0) {
-			setTimeout(check, TASK_CHECK_INTERVAL);
-			return;
-		}
-
-		// Collect the scheduler-side mutations as each task finishes.
-		// Keyed by task.id → { status }. `next_run` is intentionally NOT
-		// recorded here; it is re-derived in `mergeTasks` from the FRESH
-		// task's schedule fields so IPC schedule updates that landed during
-		// execution are honored.
-		const updates = new Map<string, { status: ScheduledTask["status"] }>();
-
-		const sem = makeSemaphore(MAX_CONCURRENT_TASKS);
-
-		const runTask = async (task: ScheduledTask) => {
-			await sem.acquire();
-			log.info(
-				{ taskId: task.id, prompt: task.prompt.slice(0, 80) },
-				"Running scheduled task",
-			);
-			try {
-				const result = await deps.spawnEphemeral(
-					task.chatId,
-					task.prompt,
-					task,
-				);
-				if (result.result) {
-					await deps.sendMessage(task.chatId, result.result);
-				}
-			} catch (err) {
-				log.error({ taskId: task.id, err }, "Scheduled task failed");
-			} finally {
-				sem.release();
+		try {
+			const result = await deps.spawnEphemeral(task.chatId, task.prompt, task);
+			if (result.result) {
+				await deps.sendMessage(task.chatId, result.result);
 			}
+		} catch (err) {
+			log.error({ taskId: task.id, err }, "Scheduled task failed");
+		} finally {
+			sem.release();
+		}
+		try {
+			// `next_run` is re-derived in `mergeTasks` from the FRESH task, so
+			// IPC schedule updates that landed during execution are honored.
+			writeBack(
+				new Map([
+					[
+						task.id,
+						{ status: task.schedule_type === "once" ? "paused" : "active" },
+					],
+				]),
+			);
+		} catch (err) {
+			log.error({ taskId: task.id, err }, "Failed to write task status");
+		} finally {
+			inFlight.delete(task.id);
+		}
+	};
 
-			// Record only the status the scheduler wants to store. `next_run`
-			// is computed later in `mergeTasks` against the fresh task.
-			updates.set(task.id, {
-				status: task.schedule_type === "once" ? "paused" : "active",
-			});
-		};
+	const tick = async (): Promise<Promise<void>[]> => {
+		const now = new Date();
+		const dueTasks = deps
+			.readTasks()
+			.filter(
+				(task) =>
+					task.status === "active" &&
+					task.next_run !== null &&
+					new Date(task.next_run) <= now &&
+					!inFlight.has(task.id),
+			);
+		if (dueTasks.length === 0) return [];
 
 		// Precondition gate — the cheapest token in the system is the one a
 		// container never boots to spend. Evaluated on the host, before any
@@ -228,25 +253,27 @@ export function startTaskScheduler(deps: SchedulerDeps): void {
 			dueTasks,
 			deps.checkPrecondition,
 		);
-		for (const [id, update] of skipUpdates) updates.set(id, update);
+		writeBack(skipUpdates);
 
-		if (runnable.length === 0 && updates.size === 0) {
-			setTimeout(check, TASK_CHECK_INTERVAL);
-			return;
-		}
-
-		// Spawn every runnable task concurrently (bounded by semaphore).
-		await Promise.all(runnable.map((task) => runTask(task)));
-
-		// Re-read tasks.json now that all spawns have finished.
-		// This captures any IPC writes that occurred during execution.
-		const freshTasks = deps.readTasks();
-		const merged = mergeTasks(freshTasks, updates);
-		deps.writeTasks(merged);
-
-		setTimeout(check, TASK_CHECK_INTERVAL);
+		// Claim synchronously, before anything else can tick.
+		const fresh = runnable.filter((task) => !inFlight.has(task.id));
+		for (const task of fresh) inFlight.add(task.id);
+		return fresh.map((task) => runTask(task));
 	};
 
-	check();
+	return { tick, inFlight };
+}
+
+export function startTaskScheduler(deps: SchedulerDeps): void {
+	const { tick } = createTaskScheduler(deps);
+	const loop = async () => {
+		try {
+			await tick();
+		} catch (err) {
+			log.error({ err }, "Scheduler tick failed");
+		}
+		setTimeout(loop, TASK_CHECK_INTERVAL);
+	};
+	loop();
 	log.info("Task scheduler started");
 }
