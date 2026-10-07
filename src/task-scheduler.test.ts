@@ -11,6 +11,8 @@ import {
 	computeNextRun,
 	mergeTasks,
 	partitionByPrecondition,
+	type SchedulerDeps,
+	startTaskScheduler,
 } from "./task-scheduler.ts";
 import type { ScheduledTask } from "./types.ts";
 
@@ -316,6 +318,159 @@ describe("partitionByPrecondition", () => {
 			expect(skipUpdates.get(task.id)).toEqual({ status: "active" });
 		} finally {
 			fs.rmSync(hb, { force: true });
+		}
+	});
+});
+
+describe("startTaskScheduler — a running session does not block the queue", () => {
+	// Drives the real production loop. setTimeout is captured so each tick is
+	// fired by hand instead of every 60s.
+	async function harness(initial: ScheduledTask[]) {
+		let store = initial.map((t) => ({ ...t }));
+		const spawned: string[] = [];
+		const finish = new Map<string, () => void>();
+		const ticks: Array<() => void> = [];
+		const deps: SchedulerDeps = {
+			readTasks: () => store.map((t) => ({ ...t })),
+			writeTasks: (tasks) => {
+				store = tasks.map((t) => ({ ...t }));
+			},
+			spawnEphemeral: (_chat, _prompt, task) => {
+				spawned.push(task.id);
+				return new Promise((resolve) => {
+					finish.set(task.id, () =>
+						resolve({ status: "success", result: null }),
+					);
+				});
+			},
+			sendMessage: async () => {},
+		};
+		const realSetTimeout = globalThis.setTimeout;
+		globalThis.setTimeout = ((fn: () => void) => {
+			ticks.push(fn);
+			return 0;
+		}) as unknown as typeof setTimeout;
+		const settle = () => new Promise((r) => realSetTimeout(r, 5));
+		const restore = () => {
+			globalThis.setTimeout = realSetTimeout;
+		};
+		startTaskScheduler(deps);
+		await settle();
+		return {
+			spawned,
+			finish,
+			settle,
+			restore,
+			store: () => store,
+			addTask: (t: ScheduledTask) => {
+				store = [...store, t];
+			},
+			nextTick: async () => {
+				const fn = ticks.shift();
+				if (fn) fn();
+				await settle();
+				return fn !== undefined;
+			},
+		};
+	}
+
+	const past = "2020-01-01T00:00:00.000Z";
+
+	test("a once-task created while a long session runs spawns on the next tick", async () => {
+		const h = await harness([
+			makeTask({
+				id: "long",
+				schedule_type: "cron",
+				schedule_value: "0 3 * * *",
+				next_run: past,
+			}),
+		]);
+		try {
+			expect(h.spawned).toEqual(["long"]);
+			// Mid-session: IPC writes a "run once now" task.
+			h.addTask(
+				makeTask({
+					id: "probe",
+					schedule_type: "once",
+					schedule_value: past,
+					next_run: past,
+				}),
+			);
+			// The next check must be scheduled while "long" is still running…
+			expect(await h.nextTick()).toBe(true);
+			// …and it must spawn the probe without waiting for "long".
+			expect(h.spawned).toEqual(["long", "probe"]);
+		} finally {
+			h.restore();
+		}
+	});
+
+	test("a running task is not spawned twice while its next_run is still past", async () => {
+		const h = await harness([
+			makeTask({
+				id: "long",
+				schedule_type: "cron",
+				schedule_value: "0 3 * * *",
+				next_run: past,
+			}),
+		]);
+		try {
+			await h.nextTick();
+			await h.nextTick();
+			expect(h.spawned).toEqual(["long"]);
+		} finally {
+			h.restore();
+		}
+	});
+
+	test("each task writes its own status when it finishes, keeping IPC writes", async () => {
+		const h = await harness([
+			makeTask({
+				id: "long",
+				schedule_type: "cron",
+				schedule_value: "0 3 * * *",
+				next_run: past,
+			}),
+		]);
+		try {
+			h.addTask(
+				makeTask({
+					id: "probe",
+					schedule_type: "once",
+					schedule_value: past,
+					next_run: past,
+				}),
+			);
+			await h.nextTick();
+			h.finish.get("probe")?.();
+			await h.settle();
+			const afterProbe = h.store();
+			expect(afterProbe.find((t) => t.id === "probe")?.status).toBe("paused");
+			// "long" is still running: untouched, still due.
+			expect(afterProbe.find((t) => t.id === "long")?.next_run).toBe(past);
+
+			// IPC adds a task while "long" runs; its write-back must keep it.
+			h.addTask(
+				makeTask({ id: "ipc-added", next_run: "2099-01-01T00:00:00.000Z" }),
+			);
+			h.finish.get("long")?.();
+			await h.settle();
+			const end = h.store();
+			expect(end.map((t) => t.id).sort()).toEqual([
+				"ipc-added",
+				"long",
+				"probe",
+			]);
+			const long = end.find((t) => t.id === "long");
+			expect(long?.status).toBe("active");
+			expect(new Date(long?.next_run ?? 0).getTime()).toBeGreaterThan(
+				Date.now(),
+			);
+
+			// Finished, so it may be picked up again when next due.
+			expect(h.spawned).toEqual(["long", "probe"]);
+		} finally {
+			h.restore();
 		}
 	});
 });
