@@ -493,7 +493,7 @@ async function main(): Promise<void> {
 	systemPrompt += `\n\nSession context:\n${contextLines.join("\n")}`;
 	if (containerInput.isScheduledTask) {
 		systemPrompt +=
-			"\nThis is a scheduled task. Your last text output will be sent to the user on Telegram. If you need a follow-up, make sure to remember what needs following up, as any response to your message will start in a new session.";
+			"\nThis is a scheduled task. Your last text output is NOT sent to anyone (the host discards it). To reach the user, write an IPC message to /ipc/messages/. If you need a follow-up, make sure to remember what needs following up, as any response to your message will start in a new session.";
 	}
 
 	const loadProject =
