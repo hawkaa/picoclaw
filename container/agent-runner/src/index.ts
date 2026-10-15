@@ -21,6 +21,7 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { runDurable } from "./durable/runner.ts";
 import { resolvePiModel } from "./resolve-pi-model.ts";
 
 interface ImageAttachment {
@@ -539,6 +540,23 @@ async function main(): Promise<void> {
 				.skills.map((s) => s.name)
 				.join(",")}`,
 		);
+
+		if (process.env["PICOCLAW_RUNNER"] === "durable") {
+			await runDurable({
+				prompt: containerInput.prompt,
+				sessionId: profile?.freshSession ? undefined : containerInput.sessionId,
+				isScheduledTask: containerInput.isScheduledTask,
+				images: containerInput.images,
+				effort: containerInput.effort,
+				modelSpec,
+				apiKey,
+				systemPrompt,
+				resourceLoader,
+				workspace: WORKSPACE,
+				agentDir: AGENT_DIR,
+			});
+			return;
+		}
 
 		const priorId = profile?.freshSession
 			? undefined
