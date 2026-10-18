@@ -8,6 +8,7 @@ import {
 	shouldRotate,
 	TIMEOUT_MIDRUN,
 	timeoutOutcome,
+	withDurable,
 } from "./chat-lifecycle.ts";
 import type { ContainerOutput } from "./types.ts";
 
@@ -159,4 +160,19 @@ describe("RunTracker", () => {
 			);
 		});
 	}
+});
+
+describe("withDurable (opt-in per chat, default off)", () => {
+	test("unset or other chats: profile untouched", () => {
+		expect(withDurable("42", undefined, undefined)).toBeUndefined();
+		const p = { persona: "operator" };
+		expect(withDurable("42", p, "7,8")).toBe(p);
+		// a prefix of a listed id is not the id
+		expect(withDurable("4", undefined, "42")).toBeUndefined();
+	});
+	test("listed chat runs durable, keeps its other env", () => {
+		expect(withDurable("42", { extraEnv: { A: "1" } }, " 7, 42 ")).toEqual({
+			extraEnv: { A: "1", PICOCLAW_RUNNER: "durable" },
+		});
+	});
 });

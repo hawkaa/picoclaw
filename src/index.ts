@@ -7,6 +7,7 @@ import {
 	CUTOFF_NOTICE,
 	routeInbound,
 	TIMEOUT_MIDRUN,
+	withDurable,
 } from "./chat-lifecycle.ts";
 import {
 	DATA_DIR,
@@ -604,7 +605,7 @@ async function startContainer(
 				images,
 				effort,
 				agentlairAAT,
-				profile,
+				profile: withDurable(chatId, profile),
 			},
 			async (output) => {
 				// Drop output (including session writes) from containers that were

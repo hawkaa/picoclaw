@@ -1,4 +1,4 @@
-import type { ContainerOutput } from "./types.ts";
+import type { ContainerOutput, SessionProfile } from "./types.ts";
 
 /**
  * A chat container lives at most CONTAINER_TIMEOUT. A message piped into one
@@ -70,4 +70,26 @@ export function routeInbound(
 	if (state.hardDeadline !== undefined && shouldRotate(state.hardDeadline, now))
 		return "rotate";
 	return "pipe";
+}
+
+/**
+ * Opt-in Pi Durable for named chats only (default off): PICOCLAW_DURABLE_CHATS
+ * is a comma-separated list of chat ids. With it on, a cap-killed run stays
+ * pending in <sessionId>.sqlite and the next container resumes it. Rollback =
+ * remove the id from the list.
+ */
+export function withDurable(
+	chatId: string,
+	profile: SessionProfile | undefined,
+	list: string | undefined = process.env["PICOCLAW_DURABLE_CHATS"],
+): SessionProfile | undefined {
+	const ids = (list ?? "")
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+	if (!ids.includes(chatId)) return profile;
+	return {
+		...profile,
+		extraEnv: { ...profile?.extraEnv, PICOCLAW_RUNNER: "durable" },
+	};
 }
