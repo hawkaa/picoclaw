@@ -718,11 +718,12 @@ async function startContainer(
 			if (held.length > 0 && !superseded) {
 				// Rotated: the messages held while this container wound down start
 				// a fresh one on the same session with a full 60 min ahead.
+				const heldImages = held.flatMap((m) => m.images ?? []);
 				await startContainer(
 					chatId,
 					held.map((m) => m.text).join("\n"),
 					caller,
-					held.flatMap((m) => m.images ?? []),
+					heldImages.length > 0 ? heldImages : undefined,
 					undefined,
 					opts,
 				);
