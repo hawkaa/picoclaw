@@ -22,6 +22,7 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { runDurable } from "./durable/runner.ts";
+import { exactEditGuard } from "./exact-edit-guard.ts";
 import { resolvePiModel } from "./resolve-pi-model.ts";
 
 interface ImageAttachment {
@@ -519,6 +520,7 @@ async function main(): Promise<void> {
 			systemPromptOverride: () => systemPrompt,
 			extensionFactories: [
 				{ name: "picoclaw-bash", factory: sanitizedBashExtension },
+				{ name: "picoclaw-exact-edit", factory: exactEditGuard(WORKSPACE) },
 			],
 			noExtensions: true,
 			additionalSkillPaths: loadProject
