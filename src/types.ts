@@ -69,6 +69,12 @@ export interface ContainerState {
 	slack?: { channel: string; threadTs: string } | undefined;
 	/** Volume to mount when chatId is a Slack runtime id. */
 	workspaceChatId?: string | undefined;
+	/** Absolute time the container is killed at (CONTAINER_TIMEOUT cap). */
+	hardDeadline?: number | undefined;
+	/** Marks a run open when a message is piped in. */
+	noteInput?: (() => void) | undefined;
+	/** Messages held for the fresh container that replaces this one. */
+	pending?: Array<{ text: string; images?: ImageAttachment[] | undefined }>;
 }
 
 export interface ScheduledTask {

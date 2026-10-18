@@ -4,6 +4,12 @@ import pino from "pino";
 import { issueAAT } from "./agentlair-aat.ts";
 import { audit } from "./audit-client.ts";
 import {
+	CUTOFF_NOTICE,
+	routeInbound,
+	TIMEOUT_MIDRUN,
+	withDurable,
+} from "./chat-lifecycle.ts";
+import {
 	DATA_DIR,
 	DEFAULT_INTERACTIVE_MODEL,
 	IDLE_TIMEOUT,
@@ -586,30 +592,31 @@ async function startContainer(
 
 	if (!opts?.slack) await dispatchChatAction(chatId);
 
-	const { proc, containerName, result } = await spawnContainer(
-		chatId,
-		{
-			prompt,
-			sessionId,
-			chatId: volumeId,
-			caller,
-			model,
-			anthropicApiKey,
-			images,
-			effort,
-			agentlairAAT,
-			profile,
-		},
-		async (output) => {
-			// Drop output (including session writes) from containers that were
-			// superseded by a /new reset after this container was spawned.
-			if (spawnTime <= (sessionResets.get(chatId) ?? 0)) return;
-			await handleOutput(chatId, output);
-		},
-		{ workspaceChatId: volumeId },
-	);
+	const { proc, containerName, result, hardDeadline, runs } =
+		await spawnContainer(
+			chatId,
+			{
+				prompt,
+				sessionId,
+				chatId: volumeId,
+				caller,
+				model,
+				anthropicApiKey,
+				images,
+				effort,
+				agentlairAAT,
+				profile: withDurable(chatId, profile),
+			},
+			async (output) => {
+				// Drop output (including session writes) from containers that were
+				// superseded by a /new reset after this container was spawned.
+				if (spawnTime <= (sessionResets.get(chatId) ?? 0)) return;
+				await handleOutput(chatId, output);
+			},
+			{ workspaceChatId: volumeId },
+		);
 
-	containers.set(chatId, {
+	const cstate: ContainerState = {
 		proc,
 		containerName,
 		chatId,
@@ -617,7 +624,10 @@ async function startContainer(
 		lastActivity: Date.now(),
 		slack: opts?.slack,
 		workspaceChatId: volumeId,
-	});
+		hardDeadline,
+		noteInput: () => runs.noteInput(),
+	};
+	containers.set(chatId, cstate);
 
 	startTyping(chatId);
 	resetIdleTimer(chatId);
@@ -703,6 +713,24 @@ async function startContainer(
 				sessionId: endSessionId,
 				botApiKey: endBotCfg?.agentlairApiKey,
 			}).catch(() => {});
+
+			const held = cstate.pending ?? [];
+			const superseded = spawnTime <= (sessionResets.get(chatId) ?? 0);
+			if (held.length > 0 && !superseded) {
+				// Rotated: the messages held while this container wound down start
+				// a fresh one on the same session with a full 60 min ahead.
+				const heldImages = held.flatMap((m) => m.images ?? []);
+				await startContainer(
+					chatId,
+					held.map((m) => m.text).join("\n"),
+					caller,
+					heldImages.length > 0 ? heldImages : undefined,
+					undefined,
+					opts,
+				);
+			} else if (finalOutput.error === TIMEOUT_MIDRUN && !superseded) {
+				await dispatchMessage(chatId, CUTOFF_NOTICE).catch(() => {});
+			}
 		})
 		.catch((err) => {
 			log.error({ chatId, err }, "Container result promise rejected");
@@ -960,10 +988,24 @@ async function handleMessage(
 	const callerName = msg.from.username ?? msg.from.first_name ?? "unknown";
 	const caller = { name: callerName, source: "telegram" as const };
 
-	// Active container → pipe follow-up
+	// Active container → pipe follow-up, unless it is too close to its hard
+	// cap: then close it and hold the message for a fresh container.
 	const state = containers.get(chatId);
+	const route = routeInbound(state, Date.now());
+	if (state && route === "rotate") {
+		if (!state.pending) {
+			state.pending = [];
+			log.info({ chatId }, "Container near its cap; rotating");
+			writeCloseSentinel(state.workspaceChatId ?? chatId, state.containerName);
+		}
+		state.pending.push({ text, images });
+		startTyping(chatId);
+		await client.sendChatAction(chatId);
+		return;
+	}
 	if (state) {
 		state.lastActivity = Date.now();
+		state.noteInput?.();
 		writeIpcInput(
 			state.workspaceChatId ?? chatId,
 			state.containerName,
@@ -1245,6 +1287,7 @@ async function handleSlackInbound(msg: SlackInbound): Promise<void> {
 				}
 				return;
 			}
+			state.noteInput?.();
 			writeIpcInput(
 				state.workspaceChatId ?? volumeId,
 				state.containerName,
@@ -1299,6 +1342,7 @@ async function handleSlackInbound(msg: SlackInbound): Promise<void> {
 	const state = containers.get(runtimeId);
 	if (state) {
 		state.lastActivity = Date.now();
+		state.noteInput?.();
 		writeIpcInput(
 			state.workspaceChatId ?? volumeId,
 			state.containerName,

@@ -41,10 +41,16 @@ test("a run killed mid-tool is finished by the next container", async () => {
 	let out = "";
 	const reader = b.stdout.getReader();
 	const decoder = new TextDecoder();
-	while (
-		!out.includes("answered new prompt") ||
-		!out.match(/"type":"result"/g)
-	) {
+	// Wait for whole packets: a raw substring match can see a result packet
+	// before its END marker arrives, and packets() then cannot parse it.
+	const answered = () => {
+		const ps = packets(out);
+		return (
+			ps.some((p) => p.result === "answered new prompt") &&
+			ps.some((p) => p.type === "result")
+		);
+	};
+	while (!answered()) {
 		const { value, done } = await reader.read();
 		if (done) break;
 		out += decoder.decode(value);
