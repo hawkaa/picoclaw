@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import pino from "pino";
-
+import { RunTracker, timeoutOutcome } from "./chat-lifecycle.ts";
 import {
 	CONTAINER_BASE_IMAGE,
 	CONTAINER_DIR,
@@ -348,6 +348,8 @@ export async function spawnContainer(
 	proc: ChildProcess;
 	containerName: string;
 	result: Promise<ContainerOutput>;
+	hardDeadline: number;
+	runs: RunTracker;
 }> {
 	const volumeId = opts?.workspaceChatId ?? chatId;
 	const image = await resolveImage(volumeId);
@@ -436,18 +438,19 @@ export async function spawnContainer(
 	proc.stdin?.end();
 	input.secrets = undefined;
 
+	// Idle timer (reset on output) bounded by an absolute hard deadline that
+	// never moves: an agent that keeps emitting output can no longer keep a
+	// container alive past CONTAINER_TIMEOUT. The prior single reset-able timer
+	// had no ceiling, so active/looping sessions never timed out (orphan leak).
+	const hardDeadline = Date.now() + CONTAINER_TIMEOUT;
+	const runs = new RunTracker();
+
 	const result = new Promise<ContainerOutput>((resolve) => {
 		let stdout = "";
 		let parseBuffer = "";
 		let newSessionId: string | undefined;
-		let hadStreamingOutput = false;
 		let outputChain = Promise.resolve();
 
-		// Idle timer (reset on output) bounded by an absolute hard deadline that
-		// never moves: an agent that keeps emitting output can no longer keep a
-		// container alive past CONTAINER_TIMEOUT. The prior single reset-able timer
-		// had no ceiling, so active/looping sessions never timed out (orphan leak).
-		const hardDeadline = Date.now() + CONTAINER_TIMEOUT;
 		let timedOut = false;
 
 		const killOnTimeout = () => {
@@ -492,7 +495,7 @@ export async function spawnContainer(
 							newSessionId = parsed.newSessionId;
 							renameLogWithSession(parsed.newSessionId);
 						}
-						hadStreamingOutput = true;
+						runs.onOutput(parsed);
 						resetTimeout();
 						outputChain = outputChain.then(() => onOutput(parsed));
 					} catch (err) {
@@ -522,18 +525,12 @@ export async function spawnContainer(
 			writeLog(`=== Session end: exit code ${code} ===`);
 			logStream.end();
 
-			if (timedOut && hadStreamingOutput) {
-				outputChain.then(() =>
-					resolve({ status: "success", result: null, newSessionId }),
-				);
-				return;
-			}
 			if (timedOut) {
-				resolve({
-					status: "error",
-					result: null,
-					error: "Container timed out",
-				});
+				// Idle at the kill = lived to its cap (success). An open run =
+				// the answer was cut off; never file that as success.
+				outputChain.then(() =>
+					resolve(timeoutOutcome(runs.open, newSessionId)),
+				);
 				return;
 			}
 			if (code !== 0) {
@@ -579,7 +576,7 @@ export async function spawnContainer(
 
 	void result.then(recordSessionOutcome);
 
-	return { proc, containerName, result };
+	return { proc, containerName, result, hardDeadline, runs };
 }
 
 /**
