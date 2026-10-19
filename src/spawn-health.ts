@@ -31,6 +31,7 @@ const GB = 1024 ** 3;
 export class SpawnHealthMonitor {
 	private failStreak = 0;
 	private streakStart = 0;
+	private firstError = "unknown";
 	private alerted = false;
 	private lowDiskAlerted = false;
 	private readonly threshold: number;
@@ -60,14 +61,24 @@ export class SpawnHealthMonitor {
 		}
 
 		if (outcome.status === "error") {
-			if (this.failStreak === 0) this.streakStart = this.now();
+			if (this.failStreak === 0) {
+				this.streakStart = this.now();
+				this.firstError = outcome.error ?? "unknown";
+			}
 			this.failStreak++;
 			if (!this.alerted && this.failStreak >= this.threshold) {
 				this.alerted = true;
 				const since = new Date(this.streakStart).toISOString().slice(0, 16);
 				const disk = free === null ? "" : ` Free disk: ${fmtGb(free)}.`;
+				// The first error names the cause; later ones are often its echo
+				// (2026-10-04: ENOSPC first, then hours of "local synchronization failed").
+				const last = outcome.error ?? "unknown";
+				const errors =
+					last === this.firstError
+						? `Error: ${truncate(last, 200)}.`
+						: `First error: ${truncate(this.firstError, 200)}. Last error: ${truncate(last, 200)}.`;
 				messages.push(
-					`🔴 PicoClaw: the last ${this.failStreak} sessions all failed (since ${since}Z). Last error: ${truncate(outcome.error ?? "unknown", 200)}.${disk}`,
+					`🔴 PicoClaw: the last ${this.failStreak} sessions all failed (since ${since}Z). ${errors}${disk}`,
 				);
 			}
 		} else {
