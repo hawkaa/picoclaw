@@ -181,6 +181,32 @@ describe("the alert names the cause, not the echo", () => {
 		expect(sent[0]).not.toContain("Container exited with code");
 	});
 
+	// 2026-10-02, verbatim from the host logs. Several containers can share one
+	// log file, so the monitor must count container closes, not files: the file
+	// opened 02:00:04 holds three sessions ending exit 0, then ENOSPC twice. The
+	// files from 02:05 to 02:35 hold five credential-sync failures (02:15 has two).
+	test("replayed 2 Oct streak: counted per session end, alert shows ENOSPC", async () => {
+		const enospc = "[agent-runner] Agent error: ENOSPC: no space left on device, write";
+		const cred =
+			"[agent-runner] Agent error: Credential setRuntimeApiKey committed for anthropic, but local synchronization failed";
+		const { m, sent } = setup({ threshold: 5 });
+		await m.record(ok); // 02:00 file, first session: exit code 0
+		const ends = [enospc, enospc, cred, cred, cred, cred, cred];
+		const alertAt: number[] = [];
+		for (const [i, line] of ends.entries()) {
+			const before = sent.length;
+			await m.record({ status: "error", error: exitError(1, agentErrorFrom(line)) });
+			if (sent.length > before) alertAt.push(i);
+		}
+		expect(sent).toHaveLength(1);
+		// fifth failure = third credential session (the second end in the 02:15 file)
+		expect(alertAt).toEqual([4]);
+		expect(sent[0]).toContain(
+			"First error: ENOSPC: no space left on device, write (exit 1)",
+		);
+		expect(sent[0]).toContain("Last error: Credential setRuntimeApiKey");
+	});
+
 	test("agentErrorFrom reads both runners and nothing else", () => {
 		expect(agentErrorFrom("[agent-runner:durable] Agent error: boom")).toBe(
 			"boom",
