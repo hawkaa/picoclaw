@@ -448,6 +448,8 @@ export async function spawnContainer(
 	const result = new Promise<ContainerOutput>((resolve) => {
 		let stdout = "";
 		let parseBuffer = "";
+		// The runner's own account of why it died; the exit code alone says nothing.
+		let lastAgentError: string | null = null;
 		let newSessionId: string | undefined;
 		let outputChain = Promise.resolve();
 
@@ -510,6 +512,7 @@ export async function spawnContainer(
 			for (const line of lines) {
 				if (!line) continue;
 				writeLog(line);
+				lastAgentError = agentErrorFrom(line) ?? lastAgentError;
 				// [agent-runner] lines are normal operational output; anything else
 				// (raw Claude Code stderr) is surfaced at warn so crashes are visible.
 				if (line.startsWith("[agent-runner]")) {
@@ -537,7 +540,7 @@ export async function spawnContainer(
 				resolve({
 					status: "error",
 					result: null,
-					error: `Container exited with code ${code}`,
+					error: exitError(code, lastAgentError),
 				});
 				return;
 			}
@@ -577,6 +580,21 @@ export async function spawnContainer(
 	void result.then(recordSessionOutcome);
 
 	return { proc, containerName, result, hardDeadline, runs };
+}
+
+/** "[agent-runner] Agent error: X" (either runner) -> "X"; anything else -> null. */
+export function agentErrorFrom(line: string): string | null {
+	const m = /^\[agent-runner(?::\w+)?\] Agent error: (.+)$/.exec(line.trim());
+	return m?.[1] ?? null;
+}
+
+export function exitError(
+	code: number | null,
+	agentError: string | null,
+): string {
+	return agentError
+		? `${agentError} (exit ${code})`
+		: `Container exited with code ${code}`;
 }
 
 /**
