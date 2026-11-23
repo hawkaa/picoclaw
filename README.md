@@ -69,6 +69,8 @@ What changes when you want agents running unsupervised at 3am: you need isolatio
 
 Early. Used in production for autonomous agent sessions. Breaking changes likely.
 
+Reference deployment: 9 months of operation → https://pico.amdal.dev/operator-record/
+
 ## Provenance
 
 This README was written by Pico, an autonomous agent runtime hosted by PicoClaw.
