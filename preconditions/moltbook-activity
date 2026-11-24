@@ -1,0 +1,325 @@
+#!/usr/bin/env bun
+/**
+ * moltbook-activity --env=<file> --seen=<file> [--ledger=<file>]
+ *
+ * "Is there anything on Moltbook a reply session would act on?"
+ *
+ *   exit 0   — something new or still unanswered → SPAWN
+ *   exit 1   — nothing the reply loop would wake for → skip
+ *   exit 255 — could not ask (no key, HTTP error, odd response shape,
+ *              unreadable watermark) → fail open
+ *
+ * This is a READ-ONLY copy of the wake rule in the reference deployment's
+ * reply poller (workspace tools/moltbook/poll.ts). It answers the same
+ * question the agent's first tool call answers, before a container is paid
+ * for. It never writes the watermark — the agent still owns that — so a
+ * comment the gate saw and the agent has not handled yet keeps waking it.
+ *
+ * Wakes on any of:
+ *   - a comment by someone else, newer than the per-post watermark, on one
+ *     of our posts (or addressed to us on a post we only commented on);
+ *   - a comment addressed to us in the last 72h with no reply from us and no
+ *     recorded decline, even if it is older than the watermark (the reply
+ *     loop answers at most 2 per run; the rest must come back);
+ *   - an unread notification newer than the notification watermark, or one
+ *     pointing at a comment the tree does not render (depth 6, spam-hidden);
+ *   - one of our own verified comments missing from its thread.
+ *
+ * When this rule and the poller disagree, the poller wins: the gate should
+ * err toward spawning. Hiding an unanswered comment is worse than no gate.
+ *
+ * Inputs are read from the task's workspace as DATA; nothing there is run.
+ */
+import fs from "node:fs";
+import path from "node:path";
+
+const API =
+	process.env["MOLTBOOK_API_BASE"] ?? "https://www.moltbook.com/api/v1";
+const CONCURRENCY = 6;
+const MAX_PAGES = 40;
+const UNANSWERED_WINDOW_MS = 72 * 3600e3;
+const NEEDLE_GRACE_MS = 600_000;
+
+type C = {
+	id: string;
+	created_at: string;
+	content?: string;
+	author?: { name?: string };
+	replies?: C[];
+	is_deleted?: boolean;
+	is_spam?: boolean;
+	parent_id?: string | null;
+};
+type Row = Record<string, unknown>;
+
+function flag(name: string): string | undefined {
+	const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
+	return hit ? hit.slice(name.length + 3) : undefined;
+}
+
+function fail(msg: string): never {
+	console.error(msg);
+	process.exit(255);
+}
+
+function work(why: string): never {
+	console.error(`work: ${why}`);
+	process.exit(0);
+}
+
+const workspace = process.env["PICOCLAW_WORKSPACE_DIR"] ?? "";
+const resolve = (p: string) =>
+	path.isAbsolute(p) && !p.startsWith("/workspace")
+		? p
+		: path.join(workspace, p.replace(/^\/workspace\/?/, ""));
+
+const envFlag = flag("env");
+const seenFlag = flag("seen");
+if (!envFlag || !seenFlag)
+	fail("usage: moltbook-activity --env=<file> --seen=<file> [--ledger=<file>]");
+
+let key: string | undefined;
+try {
+	for (const line of fs.readFileSync(resolve(envFlag), "utf-8").split("\n")) {
+		const m = line.match(/^\s*MOLTBOOK_API_KEY\s*=\s*(.*)$/);
+		if (m?.[1]) key = m[1].trim().replace(/^["']|["']$/g, "");
+	}
+} catch (err) {
+	fail(`cannot read ${resolve(envFlag)}: ${(err as Error).message}`);
+}
+if (!key) fail(`no MOLTBOOK_API_KEY in ${resolve(envFlag)}`);
+
+// Absent watermark = never ran = everything is new. Unparseable = cannot ask.
+let seen: Record<string, string> = {};
+const seenPath = resolve(seenFlag);
+if (fs.existsSync(seenPath)) {
+	try {
+		seen = JSON.parse(fs.readFileSync(seenPath, "utf-8"));
+	} catch (err) {
+		fail(`cannot parse ${seenPath}: ${(err as Error).message}`);
+	}
+} else {
+	work(`no watermark at ${seenPath}`);
+}
+
+async function get(p: string): Promise<any> {
+	let r: Response;
+	try {
+		r = await fetch(API + p, {
+			headers: {
+				Authorization: `Bearer ${key}`,
+				"User-Agent": "picoclaw-precondition/moltbook-activity",
+			},
+			signal: AbortSignal.timeout(15_000),
+		});
+	} catch (err) {
+		fail(`GET ${p}: ${(err as Error).message}`);
+	}
+	if (!r.ok) fail(`GET ${p} -> ${r.status}`);
+	return r.json();
+}
+
+async function walkTree(postId: string) {
+	const flat: C[] = [];
+	const roots: C[] = [];
+	const ids = new Set<string>();
+	const visit = (cs: C[], parent: string | null) => {
+		for (const x of cs ?? []) {
+			if (!ids.has(x.id)) {
+				ids.add(x.id);
+				flat.push({ ...x, parent_id: parent });
+			}
+			visit(x.replies ?? [], x.id);
+		}
+	};
+	let cur = "";
+	for (let pages = 0; ; pages++) {
+		if (pages >= MAX_PAGES) fail(`tree of ${postId} hit the page cap`);
+		const c = await get(
+			`/posts/${postId}/comments?sort=new&limit=50${cur ? `&cursor=${encodeURIComponent(cur)}` : ""}`,
+		);
+		if (!Array.isArray(c?.comments))
+			fail(`comments for ${postId} not an array`);
+		roots.push(...c.comments.filter((x: C) => !ids.has(x.id)));
+		visit(c.comments, null);
+		if (!c.has_more) break;
+		if (!c.next_cursor) fail(`has_more without next_cursor on ${postId}`);
+		cur = c.next_cursor;
+	}
+	return { flat, roots };
+}
+
+const toUs = (x: C, parent: C | null | undefined, ownPost: boolean, me: string) =>
+	(!parent && ownPost) ||
+	parent?.author?.name === me ||
+	new RegExp(`@${me}\\b`, "i").test(x.content ?? "") ||
+	/\b[ESC]0\d\d\b/.test(x.content ?? "");
+
+function unanswered(roots: C[], me: string, ownPost: boolean, wm: string | undefined): C[] {
+	const out: C[] = [];
+	const cutoff = new Date(Date.now() - UNANSWERED_WINDOW_MS).toISOString();
+	const walk = (cs: C[], parent: C | null) => {
+		for (const x of cs) {
+			const answered =
+				(x.replies ?? []).some((r) => r.author?.name === me && !r.is_deleted) ||
+				cs.some(
+					(s) =>
+						s.author?.name === me &&
+						!s.is_deleted &&
+						s.created_at > x.created_at &&
+						(s.content ?? "").includes(`@${x.author?.name}`),
+				);
+			if (
+				toUs(x, parent, ownPost, me) &&
+				!answered &&
+				x.author?.name &&
+				x.author.name !== me &&
+				!x.is_deleted &&
+				!x.is_spam &&
+				x.created_at >= cutoff &&
+				wm &&
+				x.created_at <= wm &&
+				!seen[`declined:${x.id}`]
+			)
+				out.push(x);
+			if (x.replies?.length) walk(x.replies, x);
+		}
+	};
+	walk(roots, null);
+	return out;
+}
+
+async function pool<T>(items: T[], fn: (t: T) => Promise<void>) {
+	const queue = [...items];
+	await Promise.all(
+		Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+			for (let t = queue.shift(); t !== undefined; t = queue.shift()) await fn(t);
+		}),
+	);
+}
+
+// ── Account and our own posts ────────────────────────────────────────────
+const home = await get("/home");
+const me = home?.your_account?.name;
+if (typeof me !== "string" || !Array.isArray(home?.activity_on_your_posts))
+	fail("/home missing your_account.name or activity_on_your_posts");
+
+const [mine, agent, notes] = await Promise.all([
+	get(`/posts?author=${encodeURIComponent(me)}&sort=new&limit=25`),
+	get("/agents/me"),
+	get("/notifications?limit=50"),
+]);
+if (!Array.isArray(mine?.posts)) fail("author feed not an array");
+const postsCount = agent?.agent?.posts_count;
+if (typeof postsCount !== "number" || mine.posts.length < Math.min(postsCount, 25))
+	fail(`author feed ${mine.posts.length} < posts_count ${postsCount}`);
+if (mine.posts.some((p: any) => p.author?.name !== me))
+	fail("author filter ignored (foreign post in feed)");
+
+// ── Notifications (cheapest, first) ──────────────────────────────────────
+const wm = seen["notes:wm"] ?? "";
+const unreadNotes = (notes?.notifications ?? []).filter(
+	(n: any) => !n.isRead && n.relatedCommentId,
+);
+for (const n of unreadNotes)
+	if (n.createdAt > wm)
+		work(`notification ${n.type} ${n.createdAt} on post ${n.relatedPostId}`);
+
+// ── Threads ──────────────────────────────────────────────────────────────
+const own = new Set<string>(mine.posts.map((p: any) => p.id));
+const targets = new Set<string>(own);
+for (const a of home.activity_on_your_posts) targets.add(a.post_id);
+
+// Our own verified comments are known-live needles; one missing from its tree
+// is either spam-hidden (news) or a blind read (the poller calls it broken).
+// Either way the session should run.
+const needles: Row[] = [];
+const ledgerFlag = flag("ledger");
+if (ledgerFlag) {
+	let text: string;
+	try {
+		text = fs.readFileSync(resolve(ledgerFlag), "utf-8");
+	} catch (err) {
+		fail(`cannot read ledger: ${(err as Error).message}`);
+	}
+	const rows: Row[] = [];
+	for (const l of text.split("\n")) {
+		if (!l.trim()) continue;
+		try {
+			rows.push(JSON.parse(l));
+		} catch {}
+	}
+	const code = (r: Row): string | undefined => {
+		if (typeof r["code"] === "string") return r["code"];
+		const v = r["verification"] as Row | null | undefined;
+		return v && typeof v === "object" && typeof v["verification_code"] === "string"
+			? (v["verification_code"] as string)
+			: undefined;
+	};
+	const ok = new Set(
+		rows
+			.filter(
+				(r) =>
+					r["ev"] === "verify" &&
+					r["http"] === 200 &&
+					/"success":\s*true/.test(String(r["body"] ?? "")),
+			)
+			.map(code),
+	);
+	for (const r of rows)
+		if (
+			r["ev"] === "post" &&
+			r["comment_id"] &&
+			ok.has(code(r)) &&
+			Date.now() - +new Date(String(r["t"])) > NEEDLE_GRACE_MS &&
+			!seen[`hidden:${r["comment_id"]}`]
+		)
+			needles.push(r);
+}
+
+const trees = new Map<string, Awaited<ReturnType<typeof walkTree>>>();
+let scanned = 0;
+await pool([...targets], async (postId) => {
+	const t = await walkTree(postId);
+	trees.set(postId, t);
+	scanned++;
+	for (const n of needles)
+		if (n["post_id"] === postId && !t.flat.some((x) => x.id === n["comment_id"]))
+			work(`own verified comment ${n["comment_id"]} absent from ${postId}`);
+
+	let postWm = seen[postId];
+	const others = t.flat.filter((x) => x.author?.name && x.author.name !== me);
+	const newest = others.map((x) => x.created_at).sort().pop();
+	if (newest && (!postWm || newest > postWm)) {
+		const nu = others.filter((x) => !postWm || x.created_at > postWm);
+		const byId = new Map(t.flat.map((x) => [x.id, x]));
+		const hit = own.has(postId)
+			? nu
+			: nu.filter((x) =>
+					toUs(x, x.parent_id ? byId.get(x.parent_id) : null, false, me),
+				);
+		if (hit.length) work(`${hit.length} new comment(s) on ${postId}`);
+		// The poller advances the watermark here at once; mirror it in memory
+		// so the unanswered pass below sees the same window.
+		postWm = newest;
+	}
+	const open = unanswered(t.roots, me, own.has(postId), postWm);
+	if (open.length) work(`${open.length} unanswered on ${postId}: ${open[0]!.id}`);
+});
+
+// ── Notifications pointing at comments no tree renders ───────────────────
+for (const n of unreadNotes) {
+	if (seen[`unserved:${n.relatedCommentId}`]) continue;
+	let t = trees.get(n.relatedPostId);
+	if (!t) {
+		t = await walkTree(n.relatedPostId);
+		trees.set(n.relatedPostId, t);
+	}
+	if (!t.flat.some((x) => x.id === n.relatedCommentId))
+		work(`unserved comment ${n.relatedCommentId} on ${n.relatedPostId}`);
+}
+
+console.error(
+	`${me}: ${scanned} thread(s), ${unreadNotes.length} unread note(s), ${needles.length} needle(s) → idle`,
+);
+process.exit(1);
